@@ -133,7 +133,7 @@ find_httpboot (EFI_HANDLE device)
 
 			/* Save the current URI */
 			UriNode = (URI_DEVICE_PATH *)Node;
-			uri_size = strlen(UriNode->Uri);
+			uri_size = strlen((char *)UriNode->Uri);
 			uri = AllocatePool(uri_size + 1);
 			if (!uri) {
 				perror(L"Failed to allocate uri\n");
@@ -159,10 +159,10 @@ generate_next_uri (CONST CHAR8 *current_uri, CONST CHAR8 *next_loader,
 	UINTN path_len = 0;
 	UINTN count = 0;
 
-	if (strncmp(current_uri, (CHAR8 *)"http://", 7) == 0) {
+	if (strncmp((char *)current_uri, "http://", 7) == 0) {
 		ptr = current_uri + 7;
 		count += 7;
-	} else if (strncmp(current_uri, (CHAR8 *)"https://", 8) == 0) {
+	} else if (strncmp((char *)current_uri, "https://", 8) == 0) {
 		ptr = current_uri + 8;
 		count += 8;
 	} else {
@@ -170,7 +170,7 @@ generate_next_uri (CONST CHAR8 *current_uri, CONST CHAR8 *next_loader,
 	}
 
 	/* Extract the path */
-	next_len = strlen(next_loader);
+	next_len = strlen((char *)next_loader);
 	while (*ptr != '\0') {
 		count++;
 		if (*ptr == '/')
@@ -195,9 +195,9 @@ extract_hostname (CONST CHAR8 *url, CHAR8 **hostname)
 	CONST CHAR8 *ptr, *start;
 	UINTN host_len = 0;
 
-	if (strncmp(url, (CHAR8 *)"http://", 7) == 0)
+	if (strncmp((char *)url, "http://", 7) == 0)
 		start = url + 7;
-	else if (strncmp(url, (CHAR8 *)"https://", 8) == 0)
+	else if (strncmp((char *)url, "https://", 8) == 0)
 		start = url + 8;
 	else
 		return EFI_INVALID_PARAMETER;
@@ -595,14 +595,20 @@ receive_http_response(EFI_HTTP_PROTOCOL *http, VOID **buffer, UINT64 *buf_size)
 
 	/* Check the length of the file */
 	for (i = 0; i < rx_message.HeaderCount; i++) {
-		if (!strcasecmp(rx_message.Headers[i].FieldName,
-				(CHAR8 *)"Content-Length")) {
+		if (!strcasecmp((char *)rx_message.Headers[i].FieldName,
+				"Content-Length")) {
 			*buf_size = ascii_to_int(rx_message.Headers[i].FieldValue);
 		}
 	}
 
 	if (*buf_size == 0) {
-		perror(L"Failed to get Content-Lenght\n");
+		perror(L"Failed to get Content-Length\n");
+		goto error;
+	}
+
+	if (*buf_size < rx_message.BodyLength) {
+		efi_status = EFI_BAD_BUFFER_SIZE;
+		perror(L"Invalid Content-Length\n");
 		goto error;
 	}
 
@@ -737,18 +743,20 @@ error:
 }
 
 EFI_STATUS
-httpboot_fetch_buffer (EFI_HANDLE image, VOID **buffer, UINT64 *buf_size)
+httpboot_fetch_buffer (EFI_HANDLE image, VOID **buffer, UINT64 *buf_size,
+		CHAR8 *name)
 {
 	EFI_STATUS efi_status;
 	EFI_HANDLE nic;
-	CHAR8 next_loader[sizeof DEFAULT_LOADER_CHAR];
+	CHAR8 *next_loader;
 	CHAR8 *next_uri = NULL;
 	CHAR8 *hostname = NULL;
 
 	if (!uri)
 		return EFI_NOT_READY;
 
-	translate_slashes(next_loader, DEFAULT_LOADER_CHAR);
+	next_loader = (CHAR8 *)AllocatePool((strlen((char *)name) + 1) * sizeof (CHAR8));
+	translate_slashes((char *)next_loader, (char *)name);
 
 	/* Create the URI for the next loader based on the original URI */
 	efi_status = generate_next_uri(uri, next_loader, &next_uri);

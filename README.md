@@ -1,11 +1,3 @@
-fork from [shim: shim-15.5 branch](https://github.com/rhboot/shim)
-
-thanks for [AdjWang](https://github.com/AdjWang)
-
-add http request in UEFI Shell 
-
-add & modify: `shim-src/http-request.c`, `shim-src/httpboot.c`,`shim-src/include/httpboot.h`,`shim-src/Makefile`
-
 # shim, a first-stage UEFI bootloader
 
 shim is a trivial EFI application that, when run, attempts to open and
@@ -33,3 +25,8 @@ There are a couple of build options, and a couple of ways to customize the
 build, described in [BUILDING](BUILDING).
 
 See the [test plan](testplan.txt), and file a ticket if anything fails!
+
+In the event that the developers need to be contacted related to a security
+incident or vulnerability, please mail [secalert@redhat.com].
+
+[secalert@redhat.com]: mailto:secalert@redhat.com

@@ -855,7 +855,11 @@ verify_sbat_section(char *SBATBase, size_t SBATSize)
 		return in_protocol ? EFI_SUCCESS : EFI_SECURITY_VIOLATION;
 	}
 
-	sbat_size = SBATSize + 1;
+	if (checked_add(SBATSize, 1, &sbat_size)) {
+		dprint(L"SBATSize + 1 would overflow\n");
+		return EFI_SECURITY_VIOLATION;
+	}
+
 	sbat_data = AllocatePool(sbat_size);
 	if (!sbat_data) {
 		console_print(L"Failed to allocate .sbat section buffer\n");
@@ -940,7 +944,7 @@ get_mem_attrs (uintptr_t addr, size_t size, uint64_t *attrs)
 	if (EFI_ERROR(efi_status) || !proto)
 		return efi_status;
 
-	if (physaddr & 0xfff || size & 0xfff || size == 0 || attrs == NULL) {
+	if (!IS_PAGE_ALIGNED(physaddr) || !IS_PAGE_ALIGNED(size) || size == 0 || attrs == NULL) {
 		dprint(L"%a called on 0x%llx-0x%llx and attrs 0x%llx\n",
 		       __func__, (unsigned long long)physaddr,
 		       (unsigned long long)(physaddr+size-1),
@@ -974,7 +978,7 @@ update_mem_attrs(uintptr_t addr, uint64_t size,
 		       (unsigned long long)addr, (unsigned long long)size,
 		       &before, efi_status);
 
-	if (physaddr & 0xfff || size & 0xfff || size == 0) {
+	if (!IS_PAGE_ALIGNED(physaddr) || !IS_PAGE_ALIGNED(size) || size == 0) {
 		dprint(L"%a called on 0x%llx-0x%llx (size 0x%llx) +%a%a%a -%a%a%a\n",
 		       __func__, (unsigned long long)physaddr,
 		       (unsigned long long)(physaddr + size - 1),
@@ -993,10 +997,20 @@ update_mem_attrs(uintptr_t addr, uint64_t size,
 	uefi_clear_attrs = shim_mem_attrs_to_uefi_mem_attrs (clear_attrs);
 	dprint("translating clear_attrs from 0x%lx to 0x%lx\n", clear_attrs, uefi_clear_attrs);
 	efi_status = EFI_SUCCESS;
-	if (uefi_set_attrs)
+	if (uefi_set_attrs) {
 		efi_status = proto->SetMemoryAttributes(proto, physaddr, size, uefi_set_attrs);
-	if (!EFI_ERROR(efi_status) && uefi_clear_attrs)
+		if (EFI_ERROR(efi_status)) {
+			dprint(L"Failed to set memory attrs:0x%0x physaddr:0x%llx size:0x%0lx status:%r\n",
+				uefi_set_attrs, physaddr, size, efi_status);
+		}
+	}
+	if (!EFI_ERROR(efi_status) && uefi_clear_attrs) {
 		efi_status = proto->ClearMemoryAttributes(proto, physaddr, size, uefi_clear_attrs);
+		if (EFI_ERROR(efi_status)) {
+			dprint(L"Failed to clear memory attrs:0x%0x physaddr:0x%llx size:0x%0lx status:%r\n",
+				uefi_clear_attrs, physaddr, size, efi_status);
+		}
+	}
 	ret = efi_status;
 
 	efi_status = get_mem_attrs (addr, size, &after);
@@ -1246,6 +1260,7 @@ handle_image (void *data, unsigned int datasize,
 		    (Section->Characteristics & EFI_IMAGE_SCN_MEM_EXECUTE) &&
 		    (mok_policy & MOK_POLICY_REQUIRE_NX)) {
 			perror(L"Section %d is writable and executable\n", i);
+			BS->FreePages(*alloc_address, *alloc_pages);
 			return EFI_UNSUPPORTED;
 		}
 
@@ -1271,6 +1286,7 @@ handle_image (void *data, unsigned int datasize,
 		if (CompareMem(Section->Name, ".reloc\0\0", 8) == 0) {
 			if (RelocSection) {
 				perror(L"Image has multiple relocation sections\n");
+				BS->FreePages(*alloc_address, *alloc_pages);
 				return EFI_UNSUPPORTED;
 			}
 			/* If it has nonzero sizes, and our bounds check
@@ -1280,8 +1296,12 @@ handle_image (void *data, unsigned int datasize,
 					Section->Misc.VirtualSize &&
 					base && end &&
 					RelocBase == base &&
-					RelocBaseEnd == end) {
+					RelocBaseEnd <= end) {
 				RelocSection = Section;
+			} else {
+				perror(L"Relocation section is invalid \n");
+				BS->FreePages(*alloc_address, *alloc_pages);
+				return EFI_UNSUPPORTED;
 			}
 		}
 
@@ -1291,10 +1311,12 @@ handle_image (void *data, unsigned int datasize,
 
 		if (!base) {
 			perror(L"Section %d has invalid base address\n", i);
+			BS->FreePages(*alloc_address, *alloc_pages);
 			return EFI_UNSUPPORTED;
 		}
 		if (!end) {
 			perror(L"Section %d has zero size\n", i);
+			BS->FreePages(*alloc_address, *alloc_pages);
 			return EFI_UNSUPPORTED;
 		}
 
@@ -1302,6 +1324,7 @@ handle_image (void *data, unsigned int datasize,
 		    (Section->VirtualAddress < context.SizeOfHeaders ||
 		     Section->PointerToRawData < context.SizeOfHeaders)) {
 			perror(L"Section %d is inside image headers\n", i);
+			BS->FreePages(*alloc_address, *alloc_pages);
 			return EFI_UNSUPPORTED;
 		}
 
@@ -1310,6 +1333,7 @@ handle_image (void *data, unsigned int datasize,
 		} else {
 			if (Section->PointerToRawData < context.SizeOfHeaders) {
 				perror(L"Section %d is inside image headers\n", i);
+				BS->FreePages(*alloc_address, *alloc_pages);
 				return EFI_UNSUPPORTED;
 			}
 
@@ -1327,7 +1351,7 @@ handle_image (void *data, unsigned int datasize,
 
 	if (context.NumberOfRvaAndSizes <= EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC) {
 		perror(L"Image has no relocation entry\n");
-		FreePool(buffer);
+		BS->FreePages(*alloc_address, *alloc_pages);
 		return EFI_UNSUPPORTED;
 	}
 
@@ -1340,7 +1364,7 @@ handle_image (void *data, unsigned int datasize,
 
 		if (EFI_ERROR(efi_status)) {
 			perror(L"Relocation failed: %r\n", efi_status);
-			FreePool(buffer);
+			BS->FreePages(*alloc_address, *alloc_pages);
 			return efi_status;
 		}
 	}
@@ -1375,7 +1399,11 @@ handle_image (void *data, unsigned int datasize,
 				     + Section->Misc.VirtualSize - 1);
 
 		addr = (uintptr_t)base;
-		length = (uintptr_t)end - (uintptr_t)base + 1;
+		// Align the length up to PAGE_SIZE. This is required because
+		// platforms generally set memory attributes at page
+		// granularity, but the section length (unlike the section
+		// address) is not required to be aligned.
+		length = ALIGN_VALUE((uintptr_t)end - (uintptr_t)base + 1, PAGE_SIZE);
 
 		if (Section->Characteristics & EFI_IMAGE_SCN_MEM_WRITE) {
 			set_attrs |= MEM_ATTR_W;
@@ -1402,10 +1430,12 @@ handle_image (void *data, unsigned int datasize,
 
 	if (!found_entry_point) {
 		perror(L"Entry point is not within sections\n");
+		BS->FreePages(*alloc_address, *alloc_pages);
 		return EFI_UNSUPPORTED;
 	}
 	if (found_entry_point > 1) {
 		perror(L"%d sections contain entry point\n", found_entry_point);
+		BS->FreePages(*alloc_address, *alloc_pages);
 		return EFI_UNSUPPORTED;
 	}
 

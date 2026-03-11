@@ -11,7 +11,8 @@ INCLUDES	= -I$(CRYPTDIR) -I$(CRYPTDIR)/Include \
 		  -isystem $(TOPDIR)/include/system \
 		  -isystem $(shell $(CC) -print-file-name=include)
 
-WARNFLAGS	+= -Wno-unused-parameter
+WARNFLAGS	+= -Wno-unused-parameter \
+		   -Wno-unused-but-set-variable
 
 CFLAGS		= $(FEATUREFLAGS) \
 		  $(OPTIMIZATIONS) \
@@ -35,6 +36,9 @@ DEFINES		+= -DMDE_CPU_AARCH64
 endif
 ifeq ($(ARCH),arm)
 DEFINES		+= -DMDE_CPU_ARM
+endif
+ifeq ($(ARCH),riscv64)
+DEFINES		+= -DMDE_CPU_RISCV64
 endif
 
 LDFLAGS		= -nostdlib -znocombreloc

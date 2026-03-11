@@ -33,7 +33,12 @@ Make.local
 /.cache/
 /certdb/
 /compile_commands.json
+/compile_commands.events.json
 /cov-int/
+/crash-*
+/fuzz-*
+!/fuzz-*.c
+/leak-*
 /post-process-pe
 /random.bin
 /sbat.*.csv
@@ -45,5 +50,3 @@ shim_cert.h
 !/test-data/
 /test-random.h
 version.c
-gnu-efi/.gitattributes
-gnu-efi/.gitignore

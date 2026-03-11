@@ -291,7 +291,7 @@ mirror_one_esl(CHAR16 *name, EFI_GUID *guid, UINT32 attrs,
 					 &var, &varsz);
 	if (EFI_ERROR(efi_status) || !var || !varsz) {
 		LogError(L"Couldn't allocate %lu bytes for mok variable \"%s\": %r\n",
-			 varsz, var, efi_status);
+			 varsz, name, efi_status);
 		return efi_status;
 	}
 
@@ -302,7 +302,7 @@ mirror_one_esl(CHAR16 *name, EFI_GUID *guid, UINT32 attrs,
 	FreePool(var);
 	if (EFI_ERROR(efi_status)) {
 		LogError(L"Couldn't create mok variable \"%s\": %r\n",
-			 varsz, var, efi_status);
+			 name, efi_status);
 		return efi_status;
 	}
 
@@ -423,12 +423,20 @@ mirror_mok_db(CHAR16 *name, CHAR8 *name8, EFI_GUID *guid, UINT32 attrs,
 		}
 
 		/* The name counts towards the size of the variable */
-		max_var_sz -= (StrLen(namen) + 1) * 2;
+		SIZE_T namen_sz = (StrLen(namen) + 1) * 2;
+		if (max_var_sz > namen_sz)
+			max_var_sz -= namen_sz;
+		else
+			max_var_sz = 0;
 		dprint(L"max_var_sz - name: %lx\n", max_var_sz);
 
 		SIZE_T howmany;
-		howmany = MIN((max_var_sz - sizeof(*esl)) / esl->SignatureSize,
-			      (esl_end_pos - pos) / esl->SignatureSize);
+		if (max_var_sz > sizeof(*esl))
+			howmany = MIN((max_var_sz - sizeof(*esl)) / esl->SignatureSize,
+				      (esl_end_pos - pos) / esl->SignatureSize);
+		else
+			howmany = 0;
+
 		if (howmany == 0) {
 			/* No signatures from this ESL can be mirrored in to a
 			 * single variable, so skip it.
@@ -1004,7 +1012,7 @@ EFI_STATUS import_mok_state(EFI_HANDLE image_handle)
 		struct mok_state_variable *v = &mok_state_variables[i];
 
 		ZeroMem(&config_template, sizeof(config_template));
-		strncpy(config_template.name, (CHAR8 *)v->rtname8, 255);
+		strncpy((char *)config_template.name, v->rtname8, 255);
 		config_template.name[255] = '\0';
 
 		config_template.data_size = v->data_size;
