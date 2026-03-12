@@ -153,18 +153,18 @@ LIBS = Cryptlib/libcryptlib.a \
        gnu-efi/$(ARCH_GNUEFI)/lib/libefi.a \
        gnu-efi/$(ARCH_GNUEFI)/gnuefi/libgnuefi.a
 
-$(SHIMSONAME): $(OBJS) $(LIBS)
-	$(LD) -o $@ $(LDFLAGS) $^ $(EFI_LIBS) lib/lib.a
+$(SHIMSONAME): $(OBJS) $(LIBS) $(EFI_LDS)
+	$(LD) -o $@ $(LDFLAGS) $(OBJS) $(LIBS) $(EFI_LIBS) lib/lib.a
 
 fallback.o: $(FALLBACK_SRCS)
 
-$(FBSONAME): $(FALLBACK_OBJS) $(LIBS)
-	$(LD) -o $@ $(LDFLAGS) $^ $(EFI_LIBS) lib/lib.a
+$(FBSONAME): $(FALLBACK_OBJS) $(LIBS) $(EFI_LDS)
+	$(LD) -o $@ $(LDFLAGS) $(FALLBACK_OBJS) $(LIBS) $(EFI_LIBS) lib/lib.a
 
 MokManager.o: $(MOK_SOURCES)
 
-$(MMSONAME): $(MOK_OBJS) $(LIBS)
-	$(LD) -o $@ $(LDFLAGS) $^ $(EFI_LIBS) lib/lib.a
+$(MMSONAME): $(MOK_OBJS) $(LIBS) $(EFI_LDS)
+	$(LD) -o $@ $(LDFLAGS) $(MOK_OBJS) $(LIBS) $(EFI_LIBS) lib/lib.a
 
 gnu-efi/$(ARCH_GNUEFI)/gnuefi/libgnuefi.a gnu-efi/$(ARCH_GNUEFI)/lib/libefi.a: CFLAGS+=-DGNU_EFI_USE_EXTERNAL_STDARG
 gnu-efi/$(ARCH_GNUEFI)/gnuefi/libgnuefi.a gnu-efi/$(ARCH_GNUEFI)/lib/libefi.a:

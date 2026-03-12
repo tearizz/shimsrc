@@ -1,7 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0+ OR BSD-2-Clause */
 /*
- * Linker script for RISC-V 64-bit EFI images using the -O binary approach
- * (crt0-efi-riscv64-local.o embeds the PE/COFF MZ header in .text.head)
+ * Linker script for RISC-V 64-bit EFI images using the -O binary approach.
+ * crt0-efi-riscv64-local.o embeds the PE/COFF MZ header in .text.head.
+ *
+ * Section layout (matching PE section table in crt0-efi-riscv64-local.S):
+ *   PE .text   : .text.head (MZ+PE header) + .text
+ *   PE .data   : .data.ident + .sbatlevel + .dynamic + .data (incl. BSS)
+ *   PE .reloc  : .reloc
+ *   PE .rodata : .vendor_cert + .sbat + .rela* + .rodata
+ *
+ * Non-PE sections (not mapped by EFI loader, used for ELF tooling only):
+ *   .dynsym, .dynstr, .hash, .gnu.hash, .note.gnu.build-id
  */
 
 OUTPUT_FORMAT("elf64-littleriscv", "elf64-littleriscv", "elf64-littleriscv")
@@ -9,6 +18,7 @@ OUTPUT_ARCH(riscv)
 ENTRY(_start)
 SECTIONS
 {
+  /* ---- PE .text section ---- */
   .text 0x0 : {
     *(.text.head)
     . = ALIGN(4096);
@@ -19,12 +29,15 @@ SECTIONS
     *(.plt)
     _evtext = .;
     . = ALIGN(4096);
-  }
-  _etext = .;
-  _text_size = . - _text;
+    _etext = .;
+  } =0
   _text_vsize = _evtext - _text;
+  _text_size = _etext - _text;
 
+  /* ---- PE .data section ---- */
+  /* _data must precede .dynamic so the EFI loader maps it. */
   . = ALIGN(4096);
+  _data = .;
   .data.ident : {
     *(.data.ident)
   }
@@ -37,7 +50,6 @@ SECTIONS
   . = ALIGN(4096);
   .data :
   {
-   _data = .;
    *(.sdata)
    *(.data)
    *(.data1)
@@ -77,16 +89,44 @@ SECTIONS
    *(.rel.local)
    . = ALIGN(16);
    _bss_end = .;
-   _evdata = .;
-   . = ALIGN(4096);
-  }
+  } =0
+  _evdata = .;
+  . = ALIGN(4096);
   _edata = .;
   _data_vsize = _evdata - _data;
-  _data_size = . - _data;
+  _data_size = _edata - _data;
 
+  /* ---- PE .reloc section ---- */
   . = ALIGN(4096);
-  .vendor_cert : { *(.vendor_cert) }
+  _reloc = .;
+  .reloc :
+  {
+    KEEP (*(.reloc))
+    _evreloc = .;
+    . = ALIGN(4096);
+    _ereloc = .;
+  } =0
+  _reloc_vsize = _evreloc - _reloc;
+  _reloc_size = _ereloc - _reloc;
 
+  /* ---- PE .rodata section ---- */
+  /* Shim-specific read-only sections precede .rela* and .rodata so that
+   * the EFI loader maps them all as part of the single .rodata PE section. */
+  . = ALIGN(4096);
+  _rodata = .;
+  .vendor_cert : { *(.vendor_cert) }
+  . = ALIGN(4096);
+  .sbat :
+  {
+    _sbat = .;
+    *(.sbat)
+    *(.sbat.*)
+    _esbat = .;
+    . = ALIGN(4096);
+    _epsbat = .;
+  }
+  _sbat_size = _epsbat - _sbat;
+  _sbat_vsize = _esbat - _sbat;
   . = ALIGN(4096);
   .rela :
   {
@@ -102,45 +142,21 @@ SECTIONS
   }
   . = ALIGN(4096);
   .rela.plt : { *(.rela.plt) }
-
   . = ALIGN(4096);
   .rodata :
   {
-    _rodata = .;
     *(.rodata*)
     _evrodata = .;
     . = ALIGN(4096);
-  }
-  _erodata = .;
-  _rodata_size = . - _rodata;
+    _erodata = .;
+  } =0
   _rodata_vsize = _evrodata - _rodata;
-  _alldata_size = _erodata - _data;
+  _rodata_size = _erodata - _rodata;
 
-  . = ALIGN(4096);
-  .sbat :
-  {
-    _sbat = .;
-    *(.sbat)
-    *(.sbat.*)
-    _esbat = .;
-    . = ALIGN(4096);
-    _epsbat = .;
-  }
-  _sbat_size = _epsbat - _sbat;
-  _sbat_vsize = _esbat - _sbat;
+  _image_end = .;
+  _alldata_size = _image_end - _data;
 
-  . = ALIGN(4096);
-  .reloc :
-  {
-    _reloc = .;
-    KEEP (*(.reloc))
-    _evreloc = .;
-    . = ALIGN(4096);
-  }
-  _ereloc = .;
-  _reloc_size = . - _reloc;
-  _reloc_vsize = _evreloc - _reloc;
-
+  /* ---- Non-PE ELF sections (not mapped by EFI loader) ---- */
   . = ALIGN(4096);
   .dynsym   : { *(.dynsym) }
   . = ALIGN(4096);
@@ -150,8 +166,6 @@ SECTIONS
   .gnu.hash : { *(.gnu.hash) }
   . = ALIGN(4096);
   .note.gnu.build-id : { *(.note.gnu.build-id) }
-
-  _image_end = .;
 
   /DISCARD/ :
   {
