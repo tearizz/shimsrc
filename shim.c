@@ -1198,12 +1198,6 @@ EFI_STATUS read_image(EFI_HANDLE image_handle, CHAR16 *ImagePath,
 		*data = sourcebuffer;
 		*datasize = sourcesize;
 	} else if (find_httpboot(shim_li->DeviceHandle)) {
-		efi_status = httpboot_fetch_buffer (image_handle,
-						    &sourcebuffer,
-						    &sourcesize);
-		if (EFI_ERROR(efi_status)) {
-			perror(L"Unable to fetch HTTP image: %r\n",
-			       efi_status);
 		str16_to_str8(ImagePath, &netbootname);
 		efi_status = httpboot_fetch_buffer (image_handle,
 						    &sourcebuffer,
