@@ -10,8 +10,9 @@ ENTRY(_start)
 SECTIONS
 {
   .text 0x0 : {
-    _text = .;
     *(.text.head)
+    . = ALIGN(4096);
+    _text = .;
     *(.text)
     *(.text.*)
     *(.gnu.linkonce.t.*)
