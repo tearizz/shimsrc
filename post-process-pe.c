@@ -274,10 +274,32 @@ load_pe(const char *const file, void *const data, const size_t datasize,
 	if (sub(ctx->SizeOfHeaders, SectionHeaderOffset, &sz0) ||
 	    div(sz0, EFI_IMAGE_SIZEOF_SECTION_HEADER, &sz0) ||
 	    (sz0 < ctx->NumberOfSections)) {
-		debug(ERROR, "(%zu - %zu) / %d >= %d\n", (size_t)ctx->SizeOfHeaders,
-		      SectionHeaderOffset, EFI_IMAGE_SIZEOF_SECTION_HEADER,
-		      ctx->NumberOfSections);
-		errx(1, "%s: image sections overflow section headers", file);
+		/*
+		 * SizeOfHeaders is too small (commonly 0 for CRT-embedded PE
+		 * headers used by ARM/RISC-V where _text == ImageBase).
+		 * Compute the minimum required value and fix it up in place,
+		 * the same way we fix timestamps and checksums.
+		 */
+		size_t min_hdr;
+		if (mul(ctx->NumberOfSections, EFI_IMAGE_SIZEOF_SECTION_HEADER,
+		        &min_hdr) ||
+		    add(SectionHeaderOffset, min_hdr, &min_hdr))
+			errx(1, "%s: section header size overflow", file);
+		/* Round up to FileAlignment */
+		if (FileAlignment > 0) {
+			size_t align = FileAlignment;
+			min_hdr = (min_hdr + align - 1) & ~(align - 1);
+		}
+		debug(INFO,
+		      "Fixing SizeOfHeaders from %zu to %zu\n",
+		      (size_t)ctx->SizeOfHeaders, min_hdr);
+		if (image_is_64_bit(PEHdr))
+			PEHdr->Pe32Plus.OptionalHeader.SizeOfHeaders =
+				(UINT32)min_hdr;
+		else
+			PEHdr->Pe32.OptionalHeader.SizeOfHeaders =
+				(UINT32)min_hdr;
+		ctx->SizeOfHeaders = min_hdr;
 	}
 
 	if (sub((uintptr_t)PEHdr, (uintptr_t)data, &sz0) ||
