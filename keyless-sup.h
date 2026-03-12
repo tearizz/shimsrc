@@ -1,7 +1,7 @@
 #include "shim.h"
 #include "openssl/x509.h"
 
-char *b64_encode(const unsigned char *in, size_t inlen);
+CHAR8 *b64_encode(const unsigned char *in, size_t inlen);
 
 // inline CHAR8 nybble_hex(UINT8 v, BOOLEAN upper);
 void bin_to_hex_buf(const UINT8 *in, UINTN len, CHAR8 *out, UINTN outcap, BOOLEAN upper);

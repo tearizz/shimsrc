@@ -6,7 +6,7 @@
 #include "openssl/buffer.h"
 
 // Base64 encode using OpenSSL BIO
-char *b64_encode(const unsigned char *in, size_t inlen) {
+CHAR8 *b64_encode(const unsigned char *in, size_t inlen) {
 	BIO *b64 = BIO_new(BIO_f_base64());
 	BIO *mem = BIO_new(BIO_s_mem());
 	if (!b64 || !mem) { BIO_free_all(b64); BIO_free_all(mem); return NULL; }
