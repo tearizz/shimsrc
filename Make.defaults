@@ -101,6 +101,9 @@ ifeq ($(ARCH),riscv64)
 	ARCH_GNUEFI		?= riscv64
 	ARCH_SUFFIX		?= riscv64
 	ARCH_SUFFIX_UPPER	?= RISCV64
+	FORMAT			:= -O binary
+	SUBSYSTEM		:= 0xa
+	ARCH_LDFLAGS		+= --defsym=EFI_SUBSYSTEM=$(SUBSYSTEM)
 endif
 
 DEFINES		= -DDEFAULT_LOADER='L"$(DEFAULT_LOADER)"' \
