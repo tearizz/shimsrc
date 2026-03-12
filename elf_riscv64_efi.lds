@@ -1,17 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0+ OR BSD-2-Clause */
+/*
+ * Linker script for RISC-V 64-bit EFI images using the -O binary approach
+ * (crt0-efi-riscv64-local.o embeds the PE/COFF MZ header in .text.head)
+ */
 
 OUTPUT_FORMAT("elf64-littleriscv", "elf64-littleriscv", "elf64-littleriscv")
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 SECTIONS
 {
-  . = 0;
-  ImageBase = .;
-  /* .hash and/or .gnu.hash MUST come first! */
-  .hash : { *(.hash) }
-  .gnu.hash : { *(.gnu.hash) }
-  . = ALIGN(4096);
-  .text : {
+  .text 0x0 : {
     _text = .;
     *(.text.head)
     *(.text)
@@ -33,7 +31,6 @@ SECTIONS
   .sbatlevel : {
     *(.sbatlevel)
   }
-
   . = ALIGN(4096);
   .dynamic  : { *(.dynamic) }
   . = ALIGN(4096);
@@ -52,12 +49,12 @@ SECTIONS
    *(SORT(.init_array.*))
    *(.init_array)
    __init_array_end = .;
-  . = ALIGN(16);
+   . = ALIGN(16);
    __CTOR_LIST__ = .;
    *(SORT(.ctors.*))
    *(.ctors)
    __CTOR_END__ = .;
-  . = ALIGN(16);
+   . = ALIGN(16);
    __DTOR_LIST__ = .;
    *(SORT(.dtors.*))
    *(.dtors)
@@ -68,8 +65,7 @@ SECTIONS
    *(.fini_array)
    __fini_array_end = .;
 
-   /* the EFI loader doesn't seem to like a .bss section, so we stick
-      it all into .data: */
+   /* BSS merged into .data (EFI loader dislikes a separate .bss section) */
    . = ALIGN(16);
    _bss = .;
    *(.sbss)
@@ -88,10 +84,7 @@ SECTIONS
   _data_size = . - _data;
 
   . = ALIGN(4096);
-  .vendor_cert :
-  {
-   *(.vendor_cert)
-  }
+  .vendor_cert : { *(.vendor_cert) }
 
   . = ALIGN(4096);
   .rela :
@@ -108,6 +101,7 @@ SECTIONS
   }
   . = ALIGN(4096);
   .rela.plt : { *(.rela.plt) }
+
   . = ALIGN(4096);
   .rodata :
   {
@@ -119,6 +113,7 @@ SECTIONS
   _erodata = .;
   _rodata_size = . - _rodata;
   _rodata_vsize = _evrodata - _rodata;
+  _alldata_size = _erodata - _data;
 
   . = ALIGN(4096);
   .sbat :
@@ -150,14 +145,19 @@ SECTIONS
   . = ALIGN(4096);
   .dynstr   : { *(.dynstr) }
   . = ALIGN(4096);
+  .hash     : { *(.hash) }
+  .gnu.hash : { *(.gnu.hash) }
+  . = ALIGN(4096);
   .note.gnu.build-id : { *(.note.gnu.build-id) }
 
-  _alldata_size = . - _data;
   _image_end = .;
 
-  .ignored.reloc :
+  /DISCARD/ :
   {
     *(.rela.reloc)
+    *(.eh_frame)
+    *(.eh_frame_hdr)
+    *(.gcc_except_table*)
     *(.note.GNU-stack)
   }
   .comment 0 : { *(.comment) }
