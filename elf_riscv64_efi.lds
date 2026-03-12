@@ -31,6 +31,15 @@ SECTIONS
     KEEP (*(.reloc))
   }
   . = ALIGN(4096);
+  .data.ident : {
+    *(.data.ident)
+  }
+  . = ALIGN(4096);
+  .sbatlevel : {
+    *(.sbatlevel)
+  }
+
+  . = ALIGN(4096);
   .dynamic  : { *(.dynamic) }
   . = ALIGN(4096);
   .data :
@@ -85,6 +94,11 @@ SECTIONS
    _bss_end = .;
   }
 
+  . = ALIGN(4096);
+  .vendor_cert :
+  {
+   *(.vendor_cert)
+  }
   . = ALIGN(4096);
   .rela :
   {
