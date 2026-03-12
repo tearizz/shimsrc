@@ -536,14 +536,14 @@ cert_b64_to_pubkey_pem(const CHAR8 *cert_b64)
     if (!cert_b64) return NULL;
 
     /* estimate DER max size and allocate temporary buffer */
-    size_t b64len = AsciiStrLen(cert_b64);
+    size_t b64len = AsciiStrLen((const char *)cert_b64);
     int der_max = (int)((b64len * 3) / 4 + 16);
     unsigned char *der = AllocatePool(der_max);
     if (!der) return NULL;
 
     /* Base64 decode using OpenSSL BIO */
     BIO *b64 = BIO_new(BIO_f_base64());
-    BIO *bmem = BIO_new_mem_buf((void *)cert_b64, (int)AsciiStrLen(cert_b64));
+    BIO *bmem = BIO_new_mem_buf((void *)cert_b64, (int)AsciiStrLen((const char *)cert_b64));
     if (!b64 || !bmem) {
         if (b64) BIO_free(b64);
         if (bmem) BIO_free(bmem);
@@ -655,7 +655,7 @@ EFI_STATUS osign_http_request(EFI_HANDLE image_handle, CHAR8 *payload,
 
 	CHAR8 *uri = NULL;
 	CHAR8 *uri_literal = "http://127.0.0.1:8080/verify";
-	UINTN uri_len = AsciiStrLen(uri_literal);
+	UINTN uri_len = AsciiStrLen((const char *)uri_literal);
 	uri = AllocatePool(uri_len + 1);
 	CopyMem(uri, uri_literal, uri_len);
 	uri[uri_len]='\0';
@@ -664,9 +664,9 @@ EFI_STATUS osign_http_request(EFI_HANDLE image_handle, CHAR8 *payload,
 	http_request_method = HttpMethodPost;
 
 	// HTTP request body contains a base64-encoded JSON ASCII payload
-	UINTN cert_len = certificate ? AsciiStrLen(certificate) : 0;
-	UINTN payload_len = payload ? AsciiStrLen(payload) : 0;
-	UINTN sig_len = signature ? AsciiStrLen(signature) :0;
+	UINTN cert_len = certificate ? AsciiStrLen((const char *)certificate) : 0;
+	UINTN payload_len = payload ? AsciiStrLen((const char *)payload) : 0;
+	UINTN sig_len = signature ? AsciiStrLen((const char *)signature) : 0;
 	UINTN json_len = cert_len + payload_len + sig_len + 50000;
 	
 	/* GLOBAL VARIABLE: tx_body_json */
@@ -681,9 +681,10 @@ EFI_STATUS osign_http_request(EFI_HANDLE image_handle, CHAR8 *payload,
 
 	/* Build JSON into tx_body_json buffer (use AsciiSPrint to write into buffer) */
 	AsciiSPrint(tx_body_json, json_len + 1,
-		"{\"certificate\":\"%a\",\"payload\":\"%a\",\"signature\":\"%a\"}",
-		certificate ? certificate : "", payload ? payload : "",
-		signature ? signature : "");
+		(CHAR8 *)"{\"certificate\":\"%a\",\"payload\":\"%a\",\"signature\":\"%a\"}",
+		certificate ? certificate : (CHAR8 *)"",
+		payload ? payload : (CHAR8 *)"",
+		signature ? signature : (CHAR8 *)"");
 
 	EFI_STATUS efi_status;
 

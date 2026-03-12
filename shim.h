@@ -294,6 +294,20 @@ verify_buffer (char *data, int datasize,
 	       PE_COFF_LOADER_IMAGE_CONTEXT *context,
 	       UINT8 *sha256hash, UINT8 *sha1hash);
 
+/* AsciiSPrint: variadic wrapper around gnu-efi's AsciiVSPrint */
+#ifndef SHIM_UNIT_TEST
+static inline UINTN
+AsciiSPrint(CHAR8 *buf, UINTN buf_size, const CHAR8 *fmt, ...)
+{
+	va_list args;
+	UINTN len;
+	va_start(args, fmt);
+	len = AsciiVSPrint(buf, buf_size, fmt, args);
+	va_end(args);
+	return len;
+}
+#endif
+
 #ifndef SHIM_UNIT_TEST
 #define perror_(file, line, func, fmt, ...) ({					\
 		UINTN __perror_ret = 0;						\
