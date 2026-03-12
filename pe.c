@@ -590,10 +590,10 @@ done:
 }
 
 /* here's a chart:
- *		i686	x86_64	aarch64
- *  64-on-64:	nyet	yes	yes
- *  64-on-32:	nyet	yes	nyet
- *  32-on-32:	yes	yes	no
+ *				i686	x86_64	aarch64		riscv64
+ *  64-on-64:	nyet	yes		 yes		 yes
+ *  64-on-32:	nyet	yes		 nyet		 nyet
+ *  32-on-32:	yes		yes		 no	 	 	 no
  */
 static int
 allow_64_bit(void)
@@ -606,6 +606,8 @@ allow_64_bit(void)
 	if (in_protocol)
 		return 1;
 	return 0;
+#elif defined(__riscv) && __riscv_xlen == 64
+	return 1;
 #else /* assuming everything else is 32-bit... */
 	return 0;
 #endif
@@ -625,6 +627,8 @@ allow_32_bit(void)
 #elif defined(__i386__) || defined(__i686__)
 	return 1;
 #elif defined(__aarch64__)
+	return 0;
+#elif defined(__riscv) && __riscv_xlen == 64
 	return 0;
 #else /* assuming everything else is 32-bit... */
 	return 1;
@@ -652,6 +656,8 @@ static const UINT16 machine_type =
 	IMAGE_FILE_MACHINE_I386;
 #elif defined(__ia64__)
 	IMAGE_FILE_MACHINE_IA64;
+#elif defined(__riscv) && __riscv_xlen == 64
+	IMAGE_FILE_MACHINE_RISCV64;
 #else
 #error this architecture is not supported by shim
 #endif
