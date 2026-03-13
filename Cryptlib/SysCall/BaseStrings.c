@@ -53,7 +53,7 @@ ScanMem8(CHAR8 *str, UINTN count, CHAR8 ch)
 UINT32
 WriteUnaligned32(UINT32 *Buffer, UINT32 Value)
 {
-	*Buffer = Value;
+    CopyMem(Buffer, &Value, sizeof(Value));
 
 	return Value;
 }
