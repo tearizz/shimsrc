@@ -39,9 +39,6 @@ relocate_coff (PE_COFF_LOADER_IMAGE_CONTEXT *context,
 	UINT64 Adjust;
 	UINT16 *Reloc, *RelocEnd;
 	char *Fixup, *FixupBase;
-	UINT16 *Fixup16;
-	UINT32 *Fixup32;
-	UINT64 *Fixup64;
 	int size = context->ImageSize;
 	void *ImageEnd = (char *)orig + size;
 	int n = 0;
