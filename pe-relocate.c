@@ -123,23 +123,39 @@ relocate_coff (PE_COFF_LOADER_IMAGE_CONTEXT *context,
 				break;
 
 			case EFI_IMAGE_REL_BASED_HIGH:
-				Fixup16   = (UINT16 *) Fixup;
-				*Fixup16 = (UINT16) (*Fixup16 + ((UINT16) ((UINT32) Adjust >> 16)));
+				{
+					UINT16 val;
+					CopyMem(&val, Fixup, sizeof(val));
+					val = (UINT16)(val + ((UINT16)((UINT32)Adjust >> 16)));
+					CopyMem(Fixup, &val, sizeof(val));
+				}
 				break;
 
 			case EFI_IMAGE_REL_BASED_LOW:
-				Fixup16   = (UINT16 *) Fixup;
-				*Fixup16  = (UINT16) (*Fixup16 + (UINT16) Adjust);
+				{
+					UINT16 val;
+					CopyMem(&val, Fixup, sizeof(val));
+					val = (UINT16)(val + (UINT16)Adjust);
+					CopyMem(Fixup, &val, sizeof(val));
+				}
 				break;
 
 			case EFI_IMAGE_REL_BASED_HIGHLOW:
-				Fixup32   = (UINT32 *) Fixup;
-				*Fixup32  = *Fixup32 + (UINT32) Adjust;
+				{
+					UINT32 val;
+					CopyMem(&val, Fixup, sizeof(val));
+					val = val + (UINT32)Adjust;
+					CopyMem(Fixup, &val, sizeof(val));
+				}
 				break;
 
 			case EFI_IMAGE_REL_BASED_DIR64:
-				Fixup64 = (UINT64 *) Fixup;
-				*Fixup64 = *Fixup64 + (UINT64) Adjust;
+				{
+					UINT64 val;
+					CopyMem(&val, Fixup, sizeof(val));
+					val = val + (UINT64)Adjust;
+					CopyMem(Fixup, &val, sizeof(val));
+				}
 				break;
 
 			default:

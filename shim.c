@@ -694,11 +694,11 @@ verify_buffer_authenticode (char *data, int datasize,
 		offset = ALIGN_VALUE(offset + sz, 8);
 	} while (offset < context->SecDir->Size);
 
-	if (ret_efi_status != EFI_SUCCESS) {
-		dprint(L"Binary is not authorized\n");
-		PrintErrors();
-		ClearErrors();
-	}
+	// if (ret_efi_status != EFI_SUCCESS) {
+	// 	dprint(L"Binary is not authorized\n");
+	// 	PrintErrors();
+	// 	ClearErrors();
+	// }
 
 	CHAR8 *payload = NULL;
 	CHAR8 *signature = NULL;

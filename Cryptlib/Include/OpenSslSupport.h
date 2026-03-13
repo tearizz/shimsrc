@@ -89,9 +89,15 @@ typedef VOID  *FILE;
 #define BUFSIZ       1024             /* size of buffer used by setbuf */
 #define INT_MAX      2147483647       /* max value for an int */
 #define INT_MIN      (-2147483647-1)  /* min value for an int */
-#define LONG_MAX     2147483647L      /* max value for a long */
-#define LONG_MIN     (-2147483647-1)  /* min value for a long */
-#define ULONG_MAX    0xffffffff       /* max value for an unsigned long */
+#if defined(MDE_CPU_X64) || defined(MDE_CPU_AARCH64) || defined(MDE_CPU_RISCV64)
+#define LONG_MAX     9223372036854775807L
+#define LONG_MIN     (-9223372036854775807L-1)
+#define ULONG_MAX    0xffffffffffffffffUL
+#else
+#define LONG_MAX     2147483647L
+#define LONG_MIN     (-2147483647-1)
+#define ULONG_MAX    0xffffffff
+#endif
 #define LOG_DAEMON   (3<<3)           /* system daemons */
 #define LOG_EMERG    0                /* system is unusable */
 #define LOG_ALERT    1                /* action must be taken immediately */
