@@ -1,4 +1,5 @@
-# Shim for OriginSign Keyless Signature Service
+# Keyless-Enhanced Secure Boot via OriginSign
+By introducing the OriginSign keyless signing service during the secure boot phase, the restrictions imposed by MOK and the Microsoft DB on this process are reduced.
 
 ## Features
 The Shim implements **keyless signature service** during the Secure Boot of the OS via [OriginSign]()
