@@ -1,3 +1,0 @@
-[submodule "gnu-efi"]
-	path = gnu-efi
-	url = https://github.com/ncroxon/gnu-efi.git
