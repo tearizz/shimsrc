@@ -819,6 +819,10 @@ httpboot_fetch_buffer_uri(EFI_HANDLE image, EFI_HANDLE nic_handle,
 	EFI_STATUS efi_status;
 	CHAR8 *hostname = NULL;
 
+    if (!buffer || !buf_size) {
+        return EFI_INVALID_PARAMETER;
+    }
+
 	if (!user_uri)
 		return EFI_NOT_READY;
 
@@ -838,7 +842,11 @@ httpboot_fetch_buffer_uri(EFI_HANDLE image, EFI_HANDLE nic_handle,
 	}
 
 error:
-	user_uri = NULL;
+    if (hostname) {
+        FreePool(hostname);
+        hostname = NULL;
+    }
+
 	return efi_status;
 }
 

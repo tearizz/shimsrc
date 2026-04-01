@@ -10,66 +10,108 @@
 EFI_HTTP_METHOD http_request_method;
 CHAR8 *tx_body_json = NULL;
 
+
 EFI_STATUS
 print_device_path(EFI_HANDLE image_handle,
                   EFI_HANDLE http_binding_handle)
 {
 	EFI_STATUS efi_status;
 	EFI_DEVICE_PATH_PROTOCOL *nic_device_path_protocol = NULL;
+	EFI_DEVICE_PATH_TO_TEXT_PROTOCOL *device_path_to_text_protocol = NULL;
+	CHAR16 *text_device_path = NULL;
+
 	efi_status = BS->OpenProtocol(http_binding_handle, &DevicePathProtocol,
-	                              (void **)&nic_device_path_protocol,
+	                              (VOID **)&nic_device_path_protocol,
 	                              image_handle, NULL,
-	                              EFI_OPEN_PROTOCOL_EXCLUSIVE);
+	                              EFI_OPEN_PROTOCOL_GET_PROTOCOL);
 	if (EFI_ERROR(efi_status)) {
-		perror(L"Failed to open nic device path protorol\n");
+		perror(L"Failed to open nic device path protocol: %r\n", efi_status);
 		return efi_status;
 	}
-	UINTN to_text_handle_count = 0;
-	EFI_HANDLE *to_text_handles = NULL;
-	efi_status =
-		BS->LocateHandleBuffer(ByProtocol, &DevicePathToTextProtocol,
-	                               NULL, &to_text_handle_count,
-	                               &to_text_handles);
-	if (EFI_ERROR(efi_status)) {
-		perror(L"Failed to locate device path to text protorol\n");
-		goto close_nic_protocol;
+
+	efi_status = BS->LocateProtocol(&DevicePathToTextProtocol, NULL,
+	                                (VOID **)&device_path_to_text_protocol);
+	if (EFI_ERROR(efi_status) || device_path_to_text_protocol == NULL) {
+		perror(L"Failed to locate device path to text protocol: %r\n", efi_status);
+		return efi_status;
 	}
-	if (to_text_handle_count == 0) {
-		efi_status = EFI_NOT_FOUND;
-		goto free_handles;
-	}
-	EFI_DEVICE_PATH_TO_TEXT_PROTOCOL *device_path_to_text_protocol = NULL;
-	efi_status =
-		BS->OpenProtocol(to_text_handles[0], &DevicePathToTextProtocol,
-	                         (void **)&device_path_to_text_protocol,
-	                         image_handle, NULL,
-	                         EFI_OPEN_PROTOCOL_GET_PROTOCOL);
-	if (EFI_ERROR(efi_status)) {
-		perror(L"Failed to open device path to text protorol\n");
-		goto free_handles;
-	}
-	CHAR16 *text_device_path =
+
+	text_device_path =
 		device_path_to_text_protocol->ConvertDevicePathToText(
 			nic_device_path_protocol,
-			FALSE, // DisplayOnly: FALSE for full path, TRUE for abbreviated
-			FALSE // AllowShortcuts: FALSE to disable shortcut expansion
+			FALSE, // DisplayOnly
+			FALSE  // AllowShortcuts
 		);
+
 	if (text_device_path != NULL) {
+		console_print(L"HTTP binding device path: %s\n", text_device_path);
 		BS->FreePool(text_device_path);
-	}
-	BS->CloseProtocol(to_text_handles[0], &DevicePathToTextProtocol,
-	                  image_handle, NULL);
-
-free_handles:
-	if (to_text_handles) {
-		BS->FreePool(to_text_handles);
+		text_device_path = NULL;
 	}
 
-close_nic_protocol:
-	BS->CloseProtocol(http_binding_handle, &DevicePathProtocol,
-	                  image_handle, NULL);
-	return efi_status;
+	return EFI_SUCCESS;
 }
+
+// EFI_STATUS
+// print_device_path(EFI_HANDLE image_handle,
+//                   EFI_HANDLE http_binding_handle)
+// {
+// 	EFI_STATUS efi_status;
+// 	EFI_DEVICE_PATH_PROTOCOL *nic_device_path_protocol = NULL;
+// 	efi_status = BS->OpenProtocol(http_binding_handle, &DevicePathProtocol,
+// 	                              (void **)&nic_device_path_protocol,
+// 	                              image_handle, NULL,
+// 	                              EFI_OPEN_PROTOL_GET_PROTOCOL);
+// 	if (EFI_ERROR(efi_status)) {
+// 		perror(L"Failed to open nic device path protorol\n");
+// 		return efi_status;
+// 	}
+// 	UINTN to_text_handle_count = 0;
+// 	EFI_HANDLE *to_text_handles = NULL;
+// 	efi_status =
+// 		BS->LocateHandleBuffer(ByProtocol, &DevicePathToTextProtocol,
+// 	                               NULL, &to_text_handle_count,
+// 	                               &to_text_handles);
+// 	if (EFI_ERROR(efi_status)) {
+// 		perror(L"Failed to locate device path to text protorol\n");
+// 		goto close_nic_protocol;
+// 	}
+// 	if (to_text_handle_count == 0) {
+// 		efi_status = EFI_NOT_FOUND;
+// 		goto free_handles;
+// 	}
+// 	EFI_DEVICE_PATH_TO_TEXT_PROTOCOL *device_path_to_text_protocol = NULL;
+// 	efi_status =
+// 		BS->OpenProtocol(to_text_handles[0], &DevicePathToTextProtocol,
+// 	                         (void **)&device_path_to_text_protocol,
+// 	                         image_handle, NULL,
+// 	                         EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+// 	if (EFI_ERROR(efi_status)) {
+// 		perror(L"Failed to open device path to text protorol\n");
+// 		goto free_handles;
+// 	}
+// 	CHAR16 *text_device_path =
+// 		device_path_to_text_protocol->ConvertDevicePathToText(
+// 			nic_device_path_protocol,
+// 			FALSE, // DisplayOnly: FALSE for full path, TRUE for abbreviated
+// 			FALSE // AllowShortcuts: FALSE to disable shortcut expansion
+// 		);
+// 	if (text_device_path != NULL) {
+// 		BS->FreePool(text_device_path);
+// 	}
+// 	BS->CloseProtocol(to_text_handles[0], &DevicePathToTextProtocol,
+// 	                  image_handle, NULL);
+// 
+// free_handles:
+// 	if (to_text_handles) {
+// 		BS->FreePool(to_text_handles);
+// 	}
+// 
+// close_nic_protocol:
+// 	BS->CloseProtocol(http_binding_handle, &DevicePathProtocol,
+// 	                  image_handle, NULL);
+// 	return efi_status;
+// }
 
 // Remember to free output outside if it's not null.
 EFI_STATUS
@@ -163,23 +205,37 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 {
 	EFI_STATUS efi_status;
 
+    BOOLEAN got_response = FALSE;
+    EFI_STATUS last_error = EFI_NOT_FOUND;
+
 	UINTN count = 0;
 	EFI_HANDLE *http_binding_handles = NULL;
+
+    if (uri == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
 	efi_status = BS->LocateHandleBuffer(ByProtocol, &EFI_HTTP_BINDING_GUID,
 	                                    NULL, &count, &http_binding_handles);
 	if (EFI_ERROR(efi_status)) {
-		perror(L"Failed to get http binding handles\n");
+		perror(L"Failed to get http binding handles: %r\n", efi_status);
 		return efi_status;
 	}
-	if (!count || !http_binding_handles) {
+	if (count == 0 || http_binding_handles == NULL) {
+        if (http_binding_handles) {
+            BS->FreePool(http_binding_handles);
+        }
 		return EFI_NOT_FOUND;
 	}
+    
+    console_print(L"Found %u HTTP binding handle(s)\n", count);
+
 	for (UINTN i = 0; i < count; i++) {
 		efi_status =
 			print_device_path(image_handle, http_binding_handles[i]);
 		if (EFI_ERROR(efi_status)) {
 			perror(L"Failed to print device path\n");
-			goto reclaim;
+			goto next_handle;
 		}
 		EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol = NULL;
 		efi_status = BS->OpenProtocol(http_binding_handles[i],
@@ -187,22 +243,21 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 		                              (void **)&ip4_cfg2_protocol,
 		                              image_handle, NULL,
 		                              EFI_OPEN_PROTOCOL_GET_PROTOCOL);
-		if (EFI_ERROR(efi_status)) {
-			perror(L"Failed to open ip4 config2 protorol\n");
-			goto reclaim;
+		if (EFI_ERROR(efi_status) || ip4_cfg2_protocol == NULL) {
+			perror(L"Failed to open ip4 config2 protorol: %r\n",efi_status);
+            last_error = efi_status;
+			goto next_handle;
 		}
 		EFI_IP4_CONFIG2_INTERFACE_INFO *ip4_cfg2_iface_info = NULL;
 		efi_status = ip4_cfg2_get_data(ip4_cfg2_protocol,
 		                               Ip4Config2DataTypeInterfaceInfo,
 		                               (void **)&ip4_cfg2_iface_info);
-		if (EFI_ERROR(efi_status)) {
-			perror(L"Failed to open ip4 config2 protorol\n");
-			goto break_loop;
+		if (EFI_ERROR(efi_status) || ip4_cfg2_iface_info == NULL) {
+			perror(L"Failed to open ip4 config2 protorol: %r\n",efi_status);
+            last_error = efi_status;
+			goto next_handle;
 		}
-		if (!ip4_cfg2_iface_info) {
-			perror(L"Failed to get ip4 config2 info\n");
-			goto break_loop;
-		}
+
 		if (check_ip4_addr(ip4_cfg2_iface_info)) {
 			print_ip4_addr_verbose(ip4_cfg2_iface_info);
 		} else {
@@ -212,16 +267,28 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 				&(EFI_IP4_CONFIG2_POLICY){
 					Ip4Config2PolicyDhcp });
 			if (EFI_ERROR(efi_status)) {
-				perror(L"Failed to set DHCP policy\n");
-				goto break_loop;
+				perror(L"Failed to set DHCP policy: %r\n", efi_status);
+                last_error = efi_status;
+				goto next_handle;
 			}
 			// Loop until get ip.
-			efi_status = wait_until_get_iface_info(
-				ip4_cfg2_protocol, &ip4_cfg2_iface_info);
-			if (EFI_ERROR(efi_status)) {
-				perror(L"Failed to get ip4 addr by DHCP\n");
-				goto break_loop;
-			}
+			// efi_status = wait_until_get_iface_info(
+			// 	ip4_cfg2_protocol, &ip4_cfg2_iface_info);
+			// if (EFI_ERROR(efi_status)) {
+			// 	perror(L"Failed to get ip4 addr by DHCP\n");
+			// 	goto break_loop;
+			// }
+            
+            BS->FreePool(ip4_cfg2_iface_info);
+            ip4_cfg2_iface_info=NULL;
+            
+            efi_status = wait_until_get_iface_info(ip4_cfg2_protocol, &ip4_cfg2_iface_info);
+            
+            if (EFI_ERROR(efi_status)) {
+                perror(L"Failed to get IP4 addr by DHCP: %r\n",efi_status);
+                last_error = efi_status;
+                goto next_handle;
+            }
 		}
 		void *data = NULL;
         // seems auto append.
@@ -231,7 +298,8 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 		                                       uri, &data, &datasize);
 		if (EFI_ERROR(efi_status)) {
 			perror(L"Failed to fetch image: %r\n", efi_status);
-			goto break_loop;
+            last_error = efi_status;
+			goto next_handle;
 		}
 	if (data && datasize > 0) {
 		CHAR8 *safe_str = AllocatePool(datasize + 1);
@@ -242,27 +310,38 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 			FreePool(safe_str);
 		}
 	}
+    
+    got_response = TRUE;
+    last_error = EFI_SUCCESS;
 
+next_handle:
     if(data){
         BS->FreePool(data);
+        data = NULL;
+    }
+    if (ip4_cfg2_iface_info) {
+        BS->FreePool(ip4_cfg2_iface_info);
+        ip4_cfg2_iface_info = NULL;
+    }
+    
+    if (ip4_cfg2_protocol) {
+        BS->CloseProtocol(http_binding_handles[i],
+                &EFI_IP4_CONFIG2_GUID,
+                image_handle, NULL);
+        ip4_cfg2_protocol = NULL;
+    }
+    
+    if (got_response) {
+        break;
+    }
+}
+    
+    if (http_binding_handles) {
+        BS->FreePool(http_binding_handles);
+        http_binding_handles = NULL;
     }
 
-break_loop:
-		if (ip4_cfg2_iface_info) {
-			BS->FreePool(ip4_cfg2_iface_info);
-		}
-		BS->CloseProtocol(http_binding_handles[i],
-		                  &EFI_IP4_CONFIG2_GUID, image_handle, NULL);
-		if (EFI_ERROR(efi_status)) {
-			break;
-		}
-	}
-reclaim:
-	if (http_binding_handles) {
-		BS->FreePool(http_binding_handles);
-	}
-	// DEBUG
-	return efi_status;
+	return got_response ? EFI_SUCCESS : last_error;
 }
 
 
