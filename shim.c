@@ -90,8 +90,7 @@ static BOOLEAN verify_x509(UINT8 *Cert, UINTN CertSize)
 	 * is 2, i.e. the second byte is 0x82.
 	 */
 	if (Cert[0] != 0x30 || Cert[1] != 0x82) {
-		dprint(L"cert[0:1] is [%02x%02x], should be [%02x%02x]\n",
-		       Cert[0], Cert[1], 0x30, 0x82);
+		dprint(L"cert[0:1] is [%02x%02x], should be [%02x%02x]\n", Cert[0], Cert[1], 0x30, 0x82);
 		return FALSE;
 	}
 
@@ -1169,8 +1168,12 @@ EFI_STATUS read_image(EFI_HANDLE image_handle, CHAR16 *ImagePath,
 
 	/* Force KeyLess Signature Services */
 	//BOOLEAN result;
-	//console_print(L"[start image] grub image path: %a \n",ImagePath);
-	//result = osign_verify(image_handle,*PathName);
+	console_print(L"[start image] grub image path: %a \n",ImagePath);
+	console_print(L"[start image] grub path name: %a \n"PathName);
+
+	console_print(L"[start image] grub image path: %r \n",ImagePath);
+	console_print(L"[start image] grub path name: %r \n",PathName);
+	result = osign_verify(image_handle,*PathName);
 	//console_print(L"[start image] result(d): %d\n",result);
 	
 	//if (result == true){

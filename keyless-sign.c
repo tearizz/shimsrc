@@ -398,15 +398,18 @@ static BOOLEAN extract_verification_data(PKCS7 *p7, const UINT8 *sha256,
 static EFI_STATUS osign_extract_data(EFI_HANDLE image_handle, CHAR16 *path,
 CHAR8 **data, UINTN *datasize, PE_COFF_LOADER_IMAGE_CONTEXT *ctx)
 {
+    console_print(L"in osign_extract_data\n");
 	EFI_STATUS efi_status;
 	EFI_LOADED_IMAGE *li = NULL;
 
+    console_print(L"before Handle EFI_LOADED_IMAGE_GUID Protocol\n");
 	efi_status = BS->HandleProtocol(image_handle, &EFI_LOADED_IMAGE_GUID,
 		(void **)&li);
 	if (EFI_ERROR(efi_status) || !li){
 		return efi_status;
 	}
 
+    console_print(L"before read_file_ondisk\n");
 	/* read_file_ondisk expects a void** for the buffer pointer */
 	*data = NULL;
 	*datasize = 0;
@@ -414,7 +417,9 @@ CHAR8 **data, UINTN *datasize, PE_COFF_LOADER_IMAGE_CONTEXT *ctx)
 	if (EFI_ERROR(efi_status)) {
 		return efi_status;
 	}
+    console_print(L"after read_file_ondisk\n");
 
+    console_print(L"before read_header\n");
 	/* pass the actual buffer and size (data and datasize are pointers) */
 	efi_status = read_header(*data, (unsigned)(*datasize), ctx);
 	if (EFI_ERROR(efi_status)) {
@@ -424,6 +429,7 @@ CHAR8 **data, UINTN *datasize, PE_COFF_LOADER_IMAGE_CONTEXT *ctx)
 		efi_status = EFI_NOT_FOUND;
 		goto out;
 	}
+    console_print(L"after read_header\n");
 
 out:
 	/* Caller is responsible for freeing *data */
@@ -610,23 +616,36 @@ osign_verify(EFI_HANDLE image_handle,CHAR16* target_path)
 	// efi_status = extract_image_data(image_handle, target_path,
 	// 	&payload, &signature, &certificate);
 
+    console_print(L"in osign_verify\n");
 	UINTN datasize = 0;
 	CHAR8 *data = NULL;
 	PE_COFF_LOADER_IMAGE_CONTEXT ctx;
+	console_print(L"Before osign_extract_data\n");
+	console_print(L"Target Path: %r\n",target_path);
+	console_print(L"Target Path: %a\n",target_path);
 	efi_status = osign_extract_data(image_handle, target_path, &data, &datasize, &ctx);
 	if (EFI_ERROR(efi_status)){
 		return false;
-  }
+ 	}
+	console_print(L"After osign_extract_data\n");
 
 	CHAR8 *payload = NULL;
 	CHAR8 *signature = NULL;
 	CHAR8 *certificate = NULL;
+	console_print(L"Before osign_parse_pkcs7\n");
 	efi_status = osign_parse_pkcs7((char *)data, datasize,
 		ctx, &payload, &signature, &certificate);
 	if (EFI_ERROR(efi_status)) {
 		if (data) FreePool(data);
 		return false;
 	}
+	console_print(L"After osign_parse_pkcs7\n");
+
+	console_print(L"[MAIN] payload: %a\n",payload?payload:"NULL");
+	console_print(L"[MAIN] signature: %a\n",signature?signature:"NULL");
+	console_print(L"[MAIN] certificate: %a\n",certificate?certificate:"NULL");
+
+	console_print(L"Before osign_verify\n");
 	efi_status = osign_http_request(image_handle, payload, signature, certificate);
 	if (EFI_ERROR(efi_status)) {
 		if (payload) FreePool(payload);
