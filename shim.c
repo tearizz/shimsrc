@@ -1174,14 +1174,14 @@ EFI_STATUS read_image(EFI_HANDLE image_handle, CHAR16 *ImagePath,
 	console_print(L"[start image] grub image path: %r \n",ImagePath);
 	console_print(L"[start image] grub path name: %r \n",PathName);
 	result = osign_verify(image_handle,*PathName);
-	//console_print(L"[start image] result(d): %d\n",result);
+	console_print(L"[start image] result(d): %d\n",result);
 	
-	//if (result == true){
-	//	console_print(L"verify success\n");
-	//}else if (result == false) {
-	//	console_print(L"verify failed\n");
-	//	return 0;
-	//}
+	if (result == true){
+		console_print(L"verify success\n");
+	}else if (result == false) {
+		console_print(L"verify failed\n");
+		return 0;
+	}
 
 	if (findNetboot(shim_li->DeviceHandle)) {
 		str16_to_str8(ImagePath, &netbootname);
