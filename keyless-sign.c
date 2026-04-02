@@ -641,9 +641,9 @@ osign_verify(EFI_HANDLE image_handle,CHAR16* target_path)
 	}
 	console_print(L"After osign_parse_pkcs7\n");
 
-	console_print(L"[MAIN] payload: %a\n",payload?payload:"NULL");
-	console_print(L"[MAIN] signature: %a\n",signature?signature:"NULL");
-	console_print(L"[MAIN] certificate: %a\n",certificate?certificate:"NULL");
+	console_print(L"[MAIN] payload: %a\n",payload);
+	console_print(L"[MAIN] signature: %a\n",signature);
+	console_print(L"[MAIN] certificate: %a\n",certificate);
 
 	console_print(L"Before osign_verify\n");
 	efi_status = osign_http_request(image_handle, payload, signature, certificate);
