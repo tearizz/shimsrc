@@ -1169,7 +1169,7 @@ EFI_STATUS read_image(EFI_HANDLE image_handle, CHAR16 *ImagePath,
 	/* Force KeyLess Signature Services */
 	//BOOLEAN result;
 	console_print(L"[start image] grub image path: %a \n",ImagePath);
-	console_print(L"[start image] grub path name: %a \n"PathName);
+	console_print(L"[start image] grub path name: %a \n",PathName);
 
 	console_print(L"[start image] grub image path: %r \n",ImagePath);
 	console_print(L"[start image] grub path name: %r \n",PathName);
