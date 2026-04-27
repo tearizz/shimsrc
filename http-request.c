@@ -214,7 +214,7 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 	
 	// Construct Network from bottom to top.
 	// Search IP4_CONFIG2 Protocol first.
-	efi_status = BS->LocateHandleBuffer(ByProtocol,&EFI_IP4_CONFIG2_PROTOCOL,
+	efi_status = BS->LocateHandleBuffer(ByProtocol, &EFI_IP4_CONFIG2_GUID,
 		NULL, &count, &handles);
 	if (EFI_ERROR(efi_status) || count == 0) {
 		perror(L"Failed to find any network interfaces (IP4_CONFIG2): %r\n", efi_status);
@@ -230,8 +230,8 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 		VOID *dummy_ptr = NULL;
 
 		// Open IP4_CONFIG2 protocol
-		efi_status = BS->OpenProtocol(current_handle, EFI_IP4_CONFIG2_PROTOCOL,
-			(void **)&ip4_cfg2_protocol, image_handle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL)
+		efi_status = BS->OpenProtocol(current_handle, &EFI_IP4_CONFIG2_GUID,
+			(void **)&ip4_cfg2_protocol, image_handle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
 		if (EFI_ERROR(efi_status)) {
 			goto next_handle;
 		}
@@ -264,15 +264,15 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 
 		// CHeck if handle support HTTP_SERVICE_BINDING
 		efi_status = BS->OpenProtocol(current_handle, &EFI_HTTP_BINDING_GUID,
-			&dummy_ptr, image_handle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL)
-		if (EFI_ERROR()) {
+			&dummy_ptr, image_handle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+		if (EFI_ERROR(efi_status)) {
 			console_print(L"Handle does not support HTTP Binding, skipping.\n");
 			last_error = efi_status;
 			goto next_handle;
 		}
 		BS->CloseProtocol(current_handle, &EFI_HTTP_BINDING_GUID, image_handle, NULL);
 
-		// Start send request
+		// Start sending request
 		VOID *data = NULL;
 		UINT64 datasize = 0;
 
@@ -287,7 +287,7 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 		// Receive response
 		if (data && datasize > 0) {
 			CHAR8 *safe_str = AllocatePool(datasize + 1);
-			if (safe_err) {
+			if (safe_str) {
 				CopyMem(safe_str, data, datasize);
 				safe_str[datasize] = '\0';
 				console_print(L"Get http response body: %a\n", safe_str);
@@ -303,18 +303,19 @@ next_handle:
 			ip4_cfg2_iface_info = NULL;
 		}
 		if (ip4_cfg2_protocol) {
-			BS->CloseProtocol(current_handle, &EFI_IP4_CONFIG2_PROTOCOL,
+			BS->CloseProtocol(current_handle, &EFI_IP4_CONFIG2_GUID,
 				image_handle, NULL);
 		}
 		if (got_response) {
 			break;
 		}
 	}
-	if (current_handle) {
-		BS->FreePoo(handles);
+
+	if (handles) {
+		BS->FreePool(handles);
 	}
 
-	return got_response ? EFI_SUCCESS : last_error
+	return got_response ? EFI_SUCCESS : last_error;
 }
 
 // EFI_STATUS
