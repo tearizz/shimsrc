@@ -199,150 +199,267 @@ wait_until_get_iface_info(EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol,
 	}
 }
 
-
-EFI_STATUS
+EFI_STATUS 
 send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 {
 	EFI_STATUS efi_status;
+	EFI_STATUS last_error = EFI_NOT_FOUND;
+	UINTN count=0;
+	EFI_HANDLE *handles = NULL;
+	BOOLEAN got_response = FALSE;
 
-    BOOLEAN got_response = FALSE;
-    EFI_STATUS last_error = EFI_NOT_FOUND;
-
-	UINTN count = 0;
-	EFI_HANDLE *http_binding_handles = NULL;
-
-    if (uri == NULL) {
-        return EFI_INVALID_PARAMETER;
-    }
-
-	efi_status = BS->LocateHandleBuffer(ByProtocol, &EFI_HTTP_BINDING_GUID,
-	                                    NULL, &count, &http_binding_handles);
-	if (EFI_ERROR(efi_status)) {
-		perror(L"Failed to get http binding handles: %r\n", efi_status);
-		return efi_status;
+	if (uri == NULL) {
+		return EFI_INVALID_PARAMETER;
 	}
-	if (count == 0 || http_binding_handles == NULL) {
-        if (http_binding_handles) {
-            BS->FreePool(http_binding_handles);
-        }
+	
+	// Construct Network from bottom to top.
+	// Search IP4_CONFIG2 Protocol first.
+	efi_status = BS->LocateHandleBuffer(ByProtocol,&EFI_IP4_CONFIG2_PROTOCOL,
+		NULL, &count, &handles);
+	if (EFI_ERROR(efi_status) || count == 0) {
+		perror(L"Failed to find any network interfaces (IP4_CONFIG2): %r\n", efi_status);
 		return EFI_NOT_FOUND;
-	}
-    
-    console_print(L"Found %u HTTP binding handle(s)\n", count);
+	} 
+
+	console_print(L"Found %u network interface(s)\n",count);
 
 	for (UINTN i = 0; i < count; i++) {
-		efi_status =
-			print_device_path(image_handle, http_binding_handles[i]);
-		if (EFI_ERROR(efi_status)) {
-			perror(L"Failed to print device path\n");
-			goto next_handle;
-		}
+		EFI_HANDLE current_handle = handles[i];
 		EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol = NULL;
-		efi_status = BS->OpenProtocol(http_binding_handles[i],
-		                              &EFI_IP4_CONFIG2_GUID,
-		                              (void **)&ip4_cfg2_protocol,
-		                              image_handle, NULL,
-		                              EFI_OPEN_PROTOCOL_GET_PROTOCOL);
-		if (EFI_ERROR(efi_status) || ip4_cfg2_protocol == NULL) {
-			perror(L"Failed to open ip4 config2 protorol: %r\n",efi_status);
-            last_error = efi_status;
-			goto next_handle;
-		}
 		EFI_IP4_CONFIG2_INTERFACE_INFO *ip4_cfg2_iface_info = NULL;
-		efi_status = ip4_cfg2_get_data(ip4_cfg2_protocol,
-		                               Ip4Config2DataTypeInterfaceInfo,
-		                               (void **)&ip4_cfg2_iface_info);
-		if (EFI_ERROR(efi_status) || ip4_cfg2_iface_info == NULL) {
-			perror(L"Failed to open ip4 config2 protorol: %r\n",efi_status);
-            last_error = efi_status;
+		VOID *dummy_ptr = NULL;
+
+		// Open IP4_CONFIG2 protocol
+		efi_status = BS->OpenProtocol(current_handle, EFI_IP4_CONFIG2_PROTOCOL,
+			(void **)&ip4_cfg2_protocol, image_handle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL)
+		if (EFI_ERROR(efi_status)) {
 			goto next_handle;
 		}
 
-		if (check_ip4_addr(ip4_cfg2_iface_info)) {
-			print_ip4_addr_verbose(ip4_cfg2_iface_info);
-		} else {
-			efi_status = ip4_cfg2_protocol->SetData(
+		// Check IP address and DHCP logic
+		efi_status = ip4_cfg2_get_data(ip4_cfg2_protocol, Ip4Config2DataTypeInterfaceInfo,
+			(void **)&ip4_cfg2_iface_info);
+		if (EFI_ERROR(efi_status) || ip4_cfg2_iface_info == NULL) {
+			goto next_handle;
+		}
+
+		if (!check_ip4_addr(ip4_cfg2_iface_info)) {
+			// Try DHCP
+			efi_status = ip4_cfg2_protocol -> SetData (
 				ip4_cfg2_protocol, Ip4Config2DataTypePolicy,
 				sizeof(EFI_IP4_CONFIG2_POLICY),
-				&(EFI_IP4_CONFIG2_POLICY){
-					Ip4Config2PolicyDhcp });
+				&(EFI_IP4_CONFIG2_POLICY){ Ip4Config2PolicyDhcp});
+			
 			if (EFI_ERROR(efi_status)) {
-				perror(L"Failed to set DHCP policy: %r\n", efi_status);
-                last_error = efi_status;
-				goto next_handle;
+				perror(L"Failed to set DHCP policy: %r\n",efi_status);
+			} else {
+				BS->FreePool(ip4_cfg2_iface_info);
+				ip4_cfg2_iface_info = NULL;
+				efi_status = wait_until_get_iface_info(ip4_cfg2_protocol, &ip4_cfg2_iface_info);
+				if (EFI_ERROR(efi_status)) {
+					perror(L"Failed to get IP4 addr by DHCP: %r\n", efi_status);
+				}
 			}
-			// Loop until get ip.
-			// efi_status = wait_until_get_iface_info(
-			// 	ip4_cfg2_protocol, &ip4_cfg2_iface_info);
-			// if (EFI_ERROR(efi_status)) {
-			// 	perror(L"Failed to get ip4 addr by DHCP\n");
-			// 	goto break_loop;
-			// }
-            
-            BS->FreePool(ip4_cfg2_iface_info);
-            ip4_cfg2_iface_info=NULL;
-            
-            efi_status = wait_until_get_iface_info(ip4_cfg2_protocol, &ip4_cfg2_iface_info);
-            
-            if (EFI_ERROR(efi_status)) {
-                perror(L"Failed to get IP4 addr by DHCP: %r\n",efi_status);
-                last_error = efi_status;
-                goto next_handle;
-            }
 		}
-		void *data = NULL;
-        // seems auto append.
-		UINT64 datasize = 0;
-		efi_status = httpboot_fetch_buffer_uri(image_handle,
-		                                       http_binding_handles[i],
-		                                       uri, &data, &datasize);
-		if (EFI_ERROR(efi_status)) {
-			perror(L"Failed to fetch image: %r\n", efi_status);
-            last_error = efi_status;
+
+		// CHeck if handle support HTTP_SERVICE_BINDING
+		efi_status = BS->OpenProtocol(current_handle, &EFI_HTTP_BINDING_GUID,
+			&dummy_ptr, image_handle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL)
+		if (EFI_ERROR()) {
+			console_print(L"Handle does not support HTTP Binding, skipping.\n");
+			last_error = efi_status;
 			goto next_handle;
 		}
-	if (data && datasize > 0) {
-		CHAR8 *safe_str = AllocatePool(datasize + 1);
-		if (safe_str) {
-			CopyMem(safe_str, data, datasize);
-			safe_str[datasize] = '\0';
-			console_print(L"Get http response body:%a\n", safe_str);
-			FreePool(safe_str);
+		BS->CloseProtocol(current_handle, &EFI_HTTP_BINDING_GUID, image_handle, NULL);
+
+		// Start send request
+		VOID *data = NULL;
+		UINT64 datasize = 0;
+
+		efi_status = httpboot_fetch_buffer_uri(image_handle, current_handle,
+			uri, &data, &datasize);
+		if (EFI_ERROR(efi_status)) {
+			perror(L"Failed to fetch buffer: %r\n",efi_status);
+			last_error = efi_status;
+			goto next_handle;
+		}
+
+		// Receive response
+		if (data && datasize > 0) {
+			CHAR8 *safe_str = AllocatePool(datasize + 1);
+			if (safe_err) {
+				CopyMem(safe_str, data, datasize);
+				safe_str[datasize] = '\0';
+				console_print(L"Get http response body: %a\n", safe_str);
+				FreePool(safe_str);
+			}
+			FreePool(data);
+			got_response = TRUE;
+			last_error = EFI_SUCCESS;
+		}
+next_handle:
+		if (ip4_cfg2_iface_info) {
+			BS->FreePool(ip4_cfg2_iface_info);
+			ip4_cfg2_iface_info = NULL;
+		}
+		if (ip4_cfg2_protocol) {
+			BS->CloseProtocol(current_handle, &EFI_IP4_CONFIG2_PROTOCOL,
+				image_handle, NULL);
+		}
+		if (got_response) {
+			break;
 		}
 	}
-    
-    got_response = TRUE;
-    last_error = EFI_SUCCESS;
+	if (current_handle) {
+		BS->FreePoo(handles);
+	}
 
-next_handle:
-    if(data){
-        BS->FreePool(data);
-        data = NULL;
-    }
-    if (ip4_cfg2_iface_info) {
-        BS->FreePool(ip4_cfg2_iface_info);
-        ip4_cfg2_iface_info = NULL;
-    }
-    
-    if (ip4_cfg2_protocol) {
-        BS->CloseProtocol(http_binding_handles[i],
-                &EFI_IP4_CONFIG2_GUID,
-                image_handle, NULL);
-        ip4_cfg2_protocol = NULL;
-    }
-    
-    if (got_response) {
-        break;
-    }
+	return got_response ? EFI_SUCCESS : last_error
 }
-    
-    if (http_binding_handles) {
-        BS->FreePool(http_binding_handles);
-        http_binding_handles = NULL;
-    }
 
-	return got_response ? EFI_SUCCESS : last_error;
-}
+// EFI_STATUS
+// send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
+// {
+// 	EFI_STATUS efi_status;
+
+//     BOOLEAN got_response = FALSE;
+//     EFI_STATUS last_error = EFI_NOT_FOUND;
+
+// 	UINTN count = 0;
+// 	EFI_HANDLE *http_binding_handles = NULL;
+
+//     if (uri == NULL) {
+//         return EFI_INVALID_PARAMETER;
+//     }
+
+// 	efi_status = BS->LocateHandleBuffer(ByProtocol, &EFI_HTTP_BINDING_GUID,
+// 	                                    NULL, &count, &http_binding_handles);
+// 	if (EFI_ERROR(efi_status)) {
+// 		perror(L"Failed to get http binding handles: %r\n", efi_status);
+// 		return efi_status;
+// 	}
+// 	if (count == 0 || http_binding_handles == NULL) {
+//         if (http_binding_handles) {
+//             BS->FreePool(http_binding_handles);
+//         }
+// 		return EFI_NOT_FOUND;
+// 	}
+    
+//     console_print(L"Found %u HTTP binding handle(s)\n", count);
+
+// 	for (UINTN i = 0; i < count; i++) {
+// 		efi_status =
+// 			print_device_path(image_handle, http_binding_handles[i]);
+// 		if (EFI_ERROR(efi_status)) {
+// 			perror(L"Failed to print device path\n");
+// 			goto next_handle;
+// 		}
+// 		EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol = NULL;
+// 		efi_status = BS->OpenProtocol(http_binding_handles[i],
+// 		                              &EFI_IP4_CONFIG2_GUID,
+// 		                              (void **)&ip4_cfg2_protocol,
+// 		                              image_handle, NULL,
+// 		                              EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+// 		if (EFI_ERROR(efi_status) || ip4_cfg2_protocol == NULL) {
+// 			perror(L"Failed to open ip4 config2 protorol: %r\n",efi_status);
+//             last_error = efi_status;
+// 			goto next_handle;
+// 		}
+// 		EFI_IP4_CONFIG2_INTERFACE_INFO *ip4_cfg2_iface_info = NULL;
+// 		efi_status = ip4_cfg2_get_data(ip4_cfg2_protocol,
+// 		                               Ip4Config2DataTypeInterfaceInfo,
+// 		                               (void **)&ip4_cfg2_iface_info);
+// 		if (EFI_ERROR(efi_status) || ip4_cfg2_iface_info == NULL) {
+// 			perror(L"Failed to open ip4 config2 protorol: %r\n",efi_status);
+//             last_error = efi_status;
+// 			goto next_handle;
+// 		}
+
+// 		if (check_ip4_addr(ip4_cfg2_iface_info)) {
+// 			print_ip4_addr_verbose(ip4_cfg2_iface_info);
+// 		} else {
+// 			efi_status = ip4_cfg2_protocol->SetData(
+// 				ip4_cfg2_protocol, Ip4Config2DataTypePolicy,
+// 				sizeof(EFI_IP4_CONFIG2_POLICY),
+// 				&(EFI_IP4_CONFIG2_POLICY){
+// 					Ip4Config2PolicyDhcp });
+// 			if (EFI_ERROR(efi_status)) {
+// 				perror(L"Failed to set DHCP policy: %r\n", efi_status);
+//                 last_error = efi_status;
+// 				goto next_handle;
+// 			}
+// 			// Loop until get ip.
+// 			// efi_status = wait_until_get_iface_info(
+// 			// 	ip4_cfg2_protocol, &ip4_cfg2_iface_info);
+// 			// if (EFI_ERROR(efi_status)) {
+// 			// 	perror(L"Failed to get ip4 addr by DHCP\n");
+// 			// 	goto break_loop;
+// 			// }
+            
+//             BS->FreePool(ip4_cfg2_iface_info);
+//             ip4_cfg2_iface_info=NULL;
+            
+//             efi_status = wait_until_get_iface_info(ip4_cfg2_protocol, &ip4_cfg2_iface_info);
+            
+//             if (EFI_ERROR(efi_status)) {
+//                 perror(L"Failed to get IP4 addr by DHCP: %r\n",efi_status);
+//                 last_error = efi_status;
+//                 goto next_handle;
+//             }
+// 		}
+// 		void *data = NULL;
+//         // seems auto append.
+// 		UINT64 datasize = 0;
+// 		efi_status = httpboot_fetch_buffer_uri(image_handle,
+// 		                                       http_binding_handles[i],
+// 		                                       uri, &data, &datasize);
+// 		if (EFI_ERROR(efi_status)) {
+// 			perror(L"Failed to fetch image: %r\n", efi_status);
+//             last_error = efi_status;
+// 			goto next_handle;
+// 		}
+// 	if (data && datasize > 0) {
+// 		CHAR8 *safe_str = AllocatePool(datasize + 1);
+// 		if (safe_str) {
+// 			CopyMem(safe_str, data, datasize);
+// 			safe_str[datasize] = '\0';
+// 			console_print(L"Get http response body:%a\n", safe_str);
+// 			FreePool(safe_str);
+// 		}
+// 	}
+    
+//     got_response = TRUE;
+//     last_error = EFI_SUCCESS;
+
+// next_handle:
+//     if(data){
+//         BS->FreePool(data);
+//         data = NULL;
+//     }
+//     if (ip4_cfg2_iface_info) {
+//         BS->FreePool(ip4_cfg2_iface_info);
+//         ip4_cfg2_iface_info = NULL;
+//     }
+    
+//     if (ip4_cfg2_protocol) {
+//         BS->CloseProtocol(http_binding_handles[i],
+//                 &EFI_IP4_CONFIG2_GUID,
+//                 image_handle, NULL);
+//         ip4_cfg2_protocol = NULL;
+//     }
+    
+//     if (got_response) {
+//         break;
+//     }
+// }
+    
+//     if (http_binding_handles) {
+//         BS->FreePool(http_binding_handles);
+//         http_binding_handles = NULL;
+//     }
+
+// 	return got_response ? EFI_SUCCESS : last_error;
+// }
 
 
 

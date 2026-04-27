@@ -1168,11 +1168,10 @@ EFI_STATUS read_image(EFI_HANDLE image_handle, CHAR16 *ImagePath,
 
 	/* Force KeyLess Signature Services */
 	BOOLEAN result;
-	console_print(L"[start image] grub image path: %a \n",ImagePath);
-	console_print(L"[start image] grub path name: %a \n",PathName);
+	console_print(L"Begin starting Force Keyless Signature\n");
+	console_print(L"[start image] grub image path: %a\n",ImagePath);
+	console_print(L"[start image] grub path name: %a\n",PathName);
 
-	console_print(L"[start image] grub image path: %r \n",ImagePath);
-	console_print(L"[start image] grub path name: %r \n",PathName);
 	result = osign_verify(image_handle,*PathName);
 	console_print(L"[start image] result(d): %d\n",result);
 	

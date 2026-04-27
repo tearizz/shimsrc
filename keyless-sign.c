@@ -621,8 +621,6 @@ osign_verify(EFI_HANDLE image_handle,CHAR16* target_path)
 	CHAR8 *data = NULL;
 	PE_COFF_LOADER_IMAGE_CONTEXT ctx;
 	console_print(L"Before osign_extract_data\n");
-	console_print(L"Target Path: %r\n",target_path);
-	console_print(L"Target Path: %a\n",target_path);
 	efi_status = osign_extract_data(image_handle, target_path, &data, &datasize, &ctx);
 	if (EFI_ERROR(efi_status)){
 		return false;
