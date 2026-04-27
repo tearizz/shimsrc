@@ -199,6 +199,14 @@ wait_until_get_iface_info(EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol,
 	}
 }
 
+static EFI_GUID gEfiDxeServicesTableGuid = { 0x5AD34BA, 0x6F02, 0x4214, { 0x95, 0x2E, 0x4D, 0xA0, 0x39, 0x8E, 0x2B, 0xB9 } };
+
+typedef struct {
+	EFI_TABLE_HEADER Hdr;
+	UINT8 Reserved[104];
+	EFI_DISPATCH Dispatch;
+} SHIM_DXE_SERVICES;
+
 EFI_STATUS 
 send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 {
@@ -210,6 +218,15 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 
 	if (uri == NULL) {
 		return EFI_INVALID_PARAMETER;
+	}
+
+	SHIM_DXE_SERVICES *gDS = NULL;
+	efi_status = BS->LocateProtocol(&gEfiDxeServicesTableGuid, NULL, (VOID **)&gDS);
+	if (!EFI_ERROR(efi_status) && gDS) {
+		console_print(L"Triggering DXE Dispatcher to load TCP/HTTP drivers...\n");
+		gDS->Dispatch();
+	} else {
+		console_print(L"Warning: Could not find DXE Services Table. Drivers might not load.\n");
 	}
 	
 	// Construct Network from bottom to top.
@@ -258,8 +275,16 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 				efi_status = wait_until_get_iface_info(ip4_cfg2_protocol, &ip4_cfg2_iface_info);
 				if (EFI_ERROR(efi_status)) {
 					perror(L"Failed to get IP4 addr by DHCP: %r\n", efi_status);
+					goto next_handle;
 				}
 			}
+		}
+
+		efi_status = BS->OpenProtocol(current_handle, &EFI_TCP_BINDING_GUID, 
+			&dummy_ptr, image_handle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+		if (EFI_ERROR(efi_status)) {
+			console_print(L"TCP not bound to this interface. Forcing connection...\n");
+			BS->ConnectController(current_handle,NULL,NULL,TRUE);
 		}
 
 		// CHeck if handle support HTTP_SERVICE_BINDING
