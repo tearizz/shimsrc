@@ -199,6 +199,104 @@ wait_until_get_iface_info(EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol,
 	}
 }
 
+/*
+	Add Firmware_Volume_Protocol GUID
+*/
+static EFI_GUID gEfiFirmwareVolume2ProtocolGuid = { 0x220e73b6, 0x6bdb, 0x4413, { 0x84, 0x5, 0xb9, 0x74, 0xb1, 0x8, 0x61, 0x90 } };
+
+typedef
+EFI_STATUS
+(EFIAPI *EFI_FV_READ_FILE) (
+	IN struct _EFI_FIRMWARE_VOLUME2_PROTOCOL *This,
+	IN EFI_GUID *NameGuid,
+	IN OUT VOID **Buffer,
+	IN OUT UINTN *BufferSize,
+	OUT UINT32 *FoundType,
+	OUT UINT32 *FileAttributes,
+	OUT UINT32 *AuthenticationStatus
+)
+
+typedef struct _EFI_FIRMWARE_VOULME2_PROTOCOL {
+	VOID *GetVolumnAttributes;
+	VOID *SetVolumnAttributes;
+	EFI_FV_READ_FILE ReadFile;
+} EFI_FIRMWARE_VOLUME2_PROTOCOL;
+
+/*
+	从固件卷中读取指定的GUID的驱动并加载
+	@param ImageHandle 		Shim的Image Handle
+	@param DriverGuid		要加载的驱动文件的GUID
+
+	@retval EFI_SUCCESS		驱动加载并启动成功
+*/
+EFI_STATUS
+LoadDriverFromFirmware(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
+{
+	EFI_STATUS Status;
+	UINTN NumHandles = 0;
+	EFI_HANDLE *HandleBuffer = NULL;
+	EFI_FIRMWARE_VOLUME2_PROTOCOL *Fv = NULL;
+
+	VOID *DriverBuffer = NULL;
+	UINTN DriverSize = 0;
+	UINTN32 AuthenticationStatus;
+
+	EFI_HANDLE DriverHandle = NULL;
+
+	// 1. Search all Firmware Volume Protocol
+	Status = BS->LocateHandleBuffer(ByProtocol, &gEfiFirmwareVolume2ProtocolGuid,
+		NULL, &NumHandles, &HandleBuffer);
+	if (EFI_ERROR(Status) || NumHandles == 0) {
+		console_print(L"Error: No Firmware Volume Protocol found.\n");
+		return Status;
+	}
+
+	// 2. 遍历所有的固件卷
+	for (UINTN i = 0; i < NumHandles; i++) {
+		Status = BS->HandleProtocol(HandleBuffer[i], &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv);
+		if (EFI_ERROR(Status)) continue;
+
+		// 3. Read drive files
+		Status = Fv->ReadFile(
+			Fv, DriverGuid, &DriverBuffer, &DriverSize, NULL, NULL, &AuthenticationStatus;)
+		if (!EFI_ERROR(Status) && DriverBuffer && DriverSize > 0) {
+			console_print(L"Found driver in FV (Size: %lu bytes). Loading...\n",DriverSize);
+
+			// 4. Load driver into memory
+			Status = BS->LoadImage(
+				FALSE,
+				ImageHandle,
+				NULL,
+				DriverBuffer,
+				DriverSize,
+				&DriverHandle
+			);
+
+			BS->FreePool(DriverBuffer);			
+
+			if (EFI_ERROR(Status)) {
+				console_print(L"LoadImage failed: %r\n",Status);
+				continue;
+			}
+
+			// 5. Boot Driver
+			Status = BS->StartImage(DriverHandle, NULL, NULL);
+			if (!EFI_ERROR(Status)) {
+				console_print(L"Driver started successfully.\n");
+				BS->FreePool(HandleBuffer);
+				return EFI_SUCCESS;
+			} else {
+				console_print(L"StartImage failed: %r\n",Status);
+				BS->FreePool(HandleBuffer);
+				return Status;
+			}
+		}
+	}
+
+	if (HandleBuffer) BS->FreePool(HandleBuffer);
+	return EFI_NOT_FOUND
+}
+
 EFI_STATUS 
 send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 {
@@ -207,12 +305,23 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 	UINTN count=0;
 	EFI_HANDLE *handles = NULL;
 	BOOLEAN got_response = FALSE;
+	VOID *Dummy = NULL;
 
 	if (uri == NULL) {
 		return EFI_INVALID_PARAMETER;
 	}
 
-	
+	// Load Tcp
+	efi_status = BS->LocateProtocol(&EFI_TCP_FILE_GUID, NULL, &Dummy);
+	if (EFI_ERROR(Status)) {
+		console_print(L"Tcp missing, loading from firmware...\n");
+		efi_status = LoadDriverFromFirmware(image_handle, &EFI_TCP_FILE_GUID);
+		if (EFI_ERROR(efi_status)) {
+			console_print(L"Failed to load TCP driver: %r\n", Status);
+			return success;
+		}
+	}
+
 	// Construct Network from bottom to top.
 	// Search IP4_CONFIG2 Protocol first.
 	efi_status = BS->LocateHandleBuffer(ByProtocol, &EFI_IP4_CONFIG2_GUID,
