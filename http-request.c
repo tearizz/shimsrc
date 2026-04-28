@@ -305,21 +305,26 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 	UINTN count=0;
 	EFI_HANDLE *handles = NULL;
 	BOOLEAN got_response = FALSE;
-	VOID *Dummy = NULL;
+	VOID *dummy_ptr = NULL;
 
 	if (uri == NULL) {
 		return EFI_INVALID_PARAMETER;
 	}
 
-	// Load Tcp
-	efi_status = BS->LocateProtocol(&EFI_TCP_FILE_GUID, NULL, &Dummy);
-	if (EFI_ERROR(Status)) {
-		console_print(L"Tcp missing, loading from firmware...\n");
-		efi_status = LoadDriverFromFirmware(image_handle, &EFI_TCP_FILE_GUID);
+	efi_status = BS->LocateProtocol(&EFI_TCP_BINDING_GUID, NULL, &dummy_ptr);
+	if (EFI_ERROR(efi_status)) {
+		console_print(L"TCP Driver not in memory. Loading from Firmware...\n");
+		efi_status = LoadDriverFromFirmware(image_handle,&EFI_TCP_FILE_GUID);
 		if (EFI_ERROR(efi_status)) {
-			console_print(L"Failed to load TCP driver: %r\n", Status);
-			return success;
+			console_print(L"Fatal: Could not load TcpDxe from firmware: %r\n", efi_status);
+			return efi_status;
 		}
+	}
+	
+	efi_status = BS->LocateProtocol(&EFI_HTTP_BINDING_GUID, NULL, &dummy_ptr);
+	if (EFI_ERROR(efi_status)) {
+		console_print(L"HTTP Driver not in memory. Loading from Firmware...\n");
+		LoadDriverFromFirmware(image_handle, &EFI_HTTP_FILE_GUID);
 	}
 
 	// Construct Network from bottom to top.
@@ -337,7 +342,6 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 		EFI_HANDLE current_handle = handles[i];
 		EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol = NULL;
 		EFI_IP4_CONFIG2_INTERFACE_INFO *ip4_cfg2_iface_info = NULL;
-		VOID *dummy_ptr = NULL;
 
 		// Open IP4_CONFIG2 protocol
 		efi_status = BS->OpenProtocol(current_handle, &EFI_IP4_CONFIG2_GUID,
@@ -361,24 +365,14 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 				&(EFI_IP4_CONFIG2_POLICY){ Ip4Config2PolicyDhcp});
 			
 			if (EFI_ERROR(efi_status)) {
-				perror(L"Failed to set DHCP policy: %r\n",efi_status);
-			} else {
 				BS->FreePool(ip4_cfg2_iface_info);
 				ip4_cfg2_iface_info = NULL;
 				efi_status = wait_until_get_iface_info(ip4_cfg2_protocol, &ip4_cfg2_iface_info);
 				if (EFI_ERROR(efi_status)) {
-					perror(L"Failed to get IP4 addr by DHCP: %r\n", efi_status);
 					goto next_handle;
 				}
 			}
 		}
-
-		// efi_status = BS->OpenProtocol(current_handle, &EFI_TCP_BINDING_GUID, 
-		// 	&dummy_ptr, image_handle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
-		// if (EFI_ERROR(efi_status)) {
-		// 	console_print(L"TCP not bound to this interface. Forcing connection...\n");
-		// 	BS->ConnectController(current_handle,NULL,NULL,TRUE);
-		// }
 
 		// CHeck if handle support HTTP_SERVICE_BINDING
 		efi_status = BS->OpenProtocol(current_handle, &EFI_HTTP_BINDING_GUID,
