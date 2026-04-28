@@ -230,73 +230,133 @@ typedef struct _EFI_FIRMWARE_VOULME2_PROTOCOL {
 
 	@retval EFI_SUCCESS		驱动加载并启动成功
 */
-EFI_STATUS
-LoadDriverFromFirmware(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
+
+EFI_STATUS LoadDriverFromFirmware(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
 {
-	EFI_STATUS Status;
-	UINTN NumHandles = 0;
-	EFI_HANDLE *HandleBuffer = NULL;
-	EFI_FIRMWARE_VOLUME2_PROTOCOL *Fv = NULL;
+    EFI_STATUS Status;
+    UINTN NumHandles = 0;
+    EFI_HANDLE *HandleBuffer = NULL;
+    EFI_FIRMWARE_VOLUME2_PROTOCOL *Fv = NULL;
+    
+    VOID *DriverBuffer = NULL;
+    UINTN DriverSize = 0;
+    UINT32 AuthenticationStatus; // 修正：UINTN32 -> UINT32
+    
+    EFI_HANDLE DriverHandle = NULL;
 
-	VOID *DriverBuffer = NULL;
-	UINTN DriverSize = 0;
-	UINTN32 AuthenticationStatus;
+    Status = BS->LocateHandleBuffer(ByProtocol, &gEfiFirmwareVolume2ProtocolGuid,
+                                    NULL, &NumHandles, &HandleBuffer);
+    if (EFI_ERROR(Status)) return Status;
 
-	EFI_HANDLE DriverHandle = NULL;
+    for (UINTN i = 0; i < NumHandles; i++) {
+        Status = BS->HandleProtocol(HandleBuffer[i], &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv);
+        if (EFI_ERROR(Status)) continue;
 
-	// 1. Search all Firmware Volume Protocol
-	Status = BS->LocateHandleBuffer(ByProtocol, &gEfiFirmwareVolume2ProtocolGuid,
-		NULL, &NumHandles, &HandleBuffer);
-	if (EFI_ERROR(Status) || NumHandles == 0) {
-		console_print(L"Error: No Firmware Volume Protocol found.\n");
-		return Status;
-	}
+        // 修正：去除末尾的分号，补全括号
+        Status = Fv->ReadFile(
+                        Fv, 
+                        DriverGuid, 
+                        &DriverBuffer, 
+                        &DriverSize, 
+                        NULL, 
+                        NULL, 
+                        &AuthenticationStatus
+                        );
+        
+        if (!EFI_ERROR(Status) && DriverBuffer && DriverSize > 0) {
+            console_print(L"Found driver in ROM (Size: %lu), loading...\n", DriverSize);
+            
+            Status = BS->LoadImage(FALSE, ImageHandle, NULL, DriverBuffer, DriverSize, &DriverHandle);
+            BS->FreePool(DriverBuffer); // 释放读取缓冲区
 
-	// 2. 遍历所有的固件卷
-	for (UINTN i = 0; i < NumHandles; i++) {
-		Status = BS->HandleProtocol(HandleBuffer[i], &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv);
-		if (EFI_ERROR(Status)) continue;
+            if (EFI_ERROR(Status)) {
+                console_print(L"LoadImage failed: %r\n", Status);
+                continue;
+            }
 
-		// 3. Read drive files
-		Status = Fv->ReadFile(
-			Fv, DriverGuid, &DriverBuffer, &DriverSize, NULL, NULL, &AuthenticationStatus;)
-		if (!EFI_ERROR(Status) && DriverBuffer && DriverSize > 0) {
-			console_print(L"Found driver in FV (Size: %lu bytes). Loading...\n",DriverSize);
+            Status = BS->StartImage(DriverHandle, NULL, NULL);
+            if (!EFI_ERROR(Status)) {
+                console_print(L"Driver started successfully.\n");
+                BS->FreePool(HandleBuffer);
+                return EFI_SUCCESS;
+            } else {
+                console_print(L"StartImage failed: %r\n", Status);
+                BS->FreePool(HandleBuffer);
+                return Status;
+            }
+        }
+    }
 
-			// 4. Load driver into memory
-			Status = BS->LoadImage(
-				FALSE,
-				ImageHandle,
-				NULL,
-				DriverBuffer,
-				DriverSize,
-				&DriverHandle
-			);
-
-			BS->FreePool(DriverBuffer);			
-
-			if (EFI_ERROR(Status)) {
-				console_print(L"LoadImage failed: %r\n",Status);
-				continue;
-			}
-
-			// 5. Boot Driver
-			Status = BS->StartImage(DriverHandle, NULL, NULL);
-			if (!EFI_ERROR(Status)) {
-				console_print(L"Driver started successfully.\n");
-				BS->FreePool(HandleBuffer);
-				return EFI_SUCCESS;
-			} else {
-				console_print(L"StartImage failed: %r\n",Status);
-				BS->FreePool(HandleBuffer);
-				return Status;
-			}
-		}
-	}
-
-	if (HandleBuffer) BS->FreePool(HandleBuffer);
-	return EFI_NOT_FOUND
+    if (HandleBuffer) BS->FreePool(HandleBuffer);
+    return EFI_NOT_FOUND;
 }
+// EFI_STATUS
+// LoadDriverFromFirmware(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
+// {
+// 	EFI_STATUS Status;
+// 	UINTN NumHandles = 0;
+// 	EFI_HANDLE *HandleBuffer = NULL;
+// 	EFI_FIRMWARE_VOLUME2_PROTOCOL *Fv = NULL;
+
+// 	VOID *DriverBuffer = NULL;
+// 	UINTN DriverSize = 0;
+// 	UINT32 AuthenticationStatus;
+
+// 	EFI_HANDLE DriverHandle = NULL;
+
+// 	// 1. Search all Firmware Volume Protocol
+// 	Status = BS->LocateHandleBuffer(ByProtocol, &gEfiFirmwareVolume2ProtocolGuid,
+// 		NULL, &NumHandles, &HandleBuffer);
+// 	if (EFI_ERROR(Status) || NumHandles == 0) {
+// 		console_print(L"Error: No Firmware Volume Protocol found.\n");
+// 		return Status;
+// 	}
+
+// 	// 2. 遍历所有的固件卷
+// 	for (UINTN i = 0; i < NumHandles; i++) {
+// 		Status = BS->HandleProtocol(HandleBuffer[i], &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv);
+// 		if (EFI_ERROR(Status)) continue;
+
+// 		// 3. Read drive files
+// 		Status = Fv->ReadFile(
+// 			Fv, DriverGuid, &DriverBuffer, &DriverSize, NULL, NULL, &AuthenticationStatus;)
+// 		if (!EFI_ERROR(Status) && DriverBuffer && DriverSize > 0) {
+// 			console_print(L"Found driver in FV (Size: %lu bytes). Loading...\n",DriverSize);
+
+// 			// 4. Load driver into memory
+// 			Status = BS->LoadImage(
+// 				FALSE,
+// 				ImageHandle,
+// 				NULL,
+// 				DriverBuffer,
+// 				DriverSize,
+// 				&DriverHandle
+// 			);
+
+// 			BS->FreePool(DriverBuffer);			
+
+// 			if (EFI_ERROR(Status)) {
+// 				console_print(L"LoadImage failed: %r\n",Status);
+// 				continue;
+// 			}
+
+// 			// 5. Boot Driver
+// 			Status = BS->StartImage(DriverHandle, NULL, NULL);
+// 			if (!EFI_ERROR(Status)) {
+// 				console_print(L"Driver started successfully.\n");
+// 				BS->FreePool(HandleBuffer);
+// 				return EFI_SUCCESS;
+// 			} else {
+// 				console_print(L"StartImage failed: %r\n",Status);
+// 				BS->FreePool(HandleBuffer);
+// 				return Status;
+// 			}
+// 		}
+// 	}
+
+// 	if (HandleBuffer) BS->FreePool(HandleBuffer);
+// 	return EFI_NOT_FOUND
+// }
 
 EFI_STATUS 
 send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
