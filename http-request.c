@@ -199,34 +199,36 @@ wait_until_get_iface_info(EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol,
 	}
 }
 
+
 // =================================================================
-// 1. 修复 gnu-efi 缺失的类型定义 (修正编译顺序)
+// 1. 必要的 GUID 定义 (只包含需要的)
 // =================================================================
 
-// A. 先声明结构体标签，这样函数指针里就可以引用它了
-struct _EFI_FIRMWARE_VOLUME2_PROTOCOL;
+// TCP Service Binding GUID
+static EFI_GUID gEfiTcp4ServiceBindingProtocolGuid = 
+    { 0x00720665, 0x67EB, 0x4A99, { 0xBA, 0xF7, 0xD3, 0xC3, 0x2E, 0x2C, 0x12, 0x43 } };
 
-// B. 定义函数指针类型
-typedef
-EFI_STATUS
-(EFIAPI *EFI_FV_READ_FILE) (
-    IN struct _EFI_FIRMWARE_VOLUME2_PROTOCOL *This,
-    IN EFI_GUID *NameGuid,
-    IN OUT VOID **Buffer,
-    IN OUT UINTN *BufferSize,
-    OUT UINT32 *FoundType,
-    OUT UINT32 *FileAttributes,
-    OUT UINT32 *AuthenticationStatus
-);
+// HTTP Service Binding GUID
+static EFI_GUID gEfiHttpServiceBindingProtocolGuid = 
+    { 0xbdc8176e, 0x4bcd, 0x4033, { 0xbe, 0xa2, 0x43, 0xa3, 0x2c, 0x73, 0x53, 0x4c } };
 
-// C. 最后定义结构体本身
-typedef struct _EFI_FIRMWARE_VOLUME2_PROTOCOL {
-    VOID *GetVolumeAttributes;  // 占位
-    VOID *SetVolumeAttributes;  // 占位
-    EFI_FV_READ_FILE ReadFile;  // 我们需要的核心函数
-} EFI_FIRMWARE_VOLUME2_PROTOCOL;
+// 文件系统相关 GUID (加载文件需要)
+static EFI_GUID gEfiLoadedImageProtocolGuid = 
+    { 0x5B1B31A1, 0x9562, 0x11d2, { 0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B } };
+static EFI_GUID gEfiSimpleFileSystemProtocolGuid = 
+    { 0x964E5B22, 0x6459, 0x11D2, { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B } };
+static EFI_GUID gEfiFileInfoGuid = 
+    { 0x09576e92, 0x6d3f, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } };
 
-EFI_STATUS LoadDriverFromFile(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
+// 宏定义
+#define EFI_TCP_BINDING_GUID  gEfiTcp4ServiceBindingProtocolGuid
+#define EFI_HTTP_BINDING_GUID gEfiHttpServiceBindingProtocolGuid
+
+// =================================================================
+// 2. 从文件加载驱动的函数 (修正版)
+// =================================================================
+
+EFI_STATUS LoadDriverFromFile(EFI_HANDLE ImageHandle, CHAR16 *FileName)
 {
     EFI_STATUS Status;
     EFI_LOADED_IMAGE_PROTOCOL *LoadedImage = NULL;
@@ -313,9 +315,11 @@ cleanup:
     if (FileInfo) BS->FreePool(FileInfo);
     if (FileHandle) FileHandle->Close(FileHandle);
     return Status;
-
-  
 }
+
+// =================================================================
+// 3. 主请求函数 (修正版)
+// =================================================================
 
 EFI_STATUS 
 send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
@@ -331,7 +335,7 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
         return EFI_INVALID_PARAMETER;
     }
 
-	// --- 1. 确保 TCP 加载 (优先从磁盘) ---
+    // --- 1. 确保 TCP 加载 (优先从磁盘) ---
     efi_status = BS->LocateProtocol(&EFI_TCP_BINDING_GUID, NULL, &dummy_ptr);
     if (EFI_ERROR(efi_status)) {
         console_print(L"TCP missing. Trying to load from disk \\EFI\\BOOT\\TcpDxe.efi...\n");
@@ -345,7 +349,7 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
     // --- 2. 确保 HTTP 加载 (优先从磁盘) ---
     efi_status = BS->LocateProtocol(&EFI_HTTP_BINDING_GUID, NULL, &dummy_ptr);
     if (EFI_ERROR(efi_status)) {
-        console_print(L"HTTP missing. Trying to load from \\EFI\\BOOT\\HttpDxe.efi)...\n");
+        console_print(L"HTTP missing. Trying to load from \\EFI\\BOOT\\HttpDxe.efi...\n");
         LoadDriverFromFile(image_handle, L"\\EFI\\BOOT\\HttpDxe.efi");
     }
 
