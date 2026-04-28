@@ -226,44 +226,9 @@ typedef struct _EFI_FIRMWARE_VOLUME2_PROTOCOL {
     EFI_FV_READ_FILE ReadFile;  // 我们需要的核心函数
 } EFI_FIRMWARE_VOLUME2_PROTOCOL;
 
-// =================================================================
-// 2. GUID 定义 (修正：添加了 HTTP Service Binding)
-// =================================================================
-
-// Firmware Volume Protocol GUID
-static EFI_GUID gEfiFirmwareVolume2ProtocolGuid = 
-    { 0x220e73b6, 0x6bdb, 0x4413, { 0x84, 0x5, 0xb9, 0x74, 0xb1, 0x8, 0x61, 0x90 } };
-
-// TcpDxe 文件 GUID (来自您的 UEFITool)
-static EFI_GUID gTcpDxeFileGuid = 
-    { 0x1A7E4468, 0x2F55, 0x4A56, { 0x90, 0x3C, 0x01, 0x26, 0x5E, 0xB7, 0x62, 0x2B } };
-
-// HttpDxe 文件 GUID (标准 GUID)
-static EFI_GUID gHttpDxeFileGuid = 
-    { 0xA6146931, 0xD233, 0x4340, { 0x9B, 0x2, 0x94, 0x65, 0xB, 0xAE, 0x75, 0x75 } };
-
-// TCP Service Binding GUID
-static EFI_GUID gEfiTcp4ServiceBindingProtocolGuid = 
-    { 0x00720665, 0x67EB, 0x4A99, { 0xBA, 0xF7, 0xD3, 0xC3, 0x2E, 0x2C, 0x12, 0x43 } };
-
-// 【新增】HTTP Service Binding GUID
-// GUID: bdc8176e-4bcd-4033-bea2-43a32c73534c
-static EFI_GUID gEfiHttpServiceBindingProtocolGuid = 
-    { 0xbdc8176e, 0x4bcd, 0x4033, { 0xbe, 0xa2, 0x43, 0xa3, 0x2c, 0x73, 0x53, 0x4c } };
-
-// 为了兼容您的代码宏，定义别名
-#define EFI_TCP_BINDING_GUID  gEfiTcp4ServiceBindingProtocolGuid
-#define EFI_HTTP_BINDING_GUID gEfiHttpServiceBindingProtocolGuid
-#define EFI_TCP_FILE_GUID     gTcpDxeFileGuid
-#define EFI_HTTP_FILE_GUID    gHttpDxeFileGuid
-
-// =================================================================
-// 3. 驱动加载函数
-// =================================================================
-
 EFI_STATUS LoadDriverFromFile(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
 {
-  EFI_STATUS Status;
+    EFI_STATUS Status;
     EFI_LOADED_IMAGE_PROTOCOL *LoadedImage = NULL;
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *FileSystem = NULL;
     EFI_FILE_PROTOCOL *RootDir = NULL;
@@ -274,7 +239,7 @@ EFI_STATUS LoadDriverFromFile(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
     UINTN FileSize;
     EFI_HANDLE DriverHandle = NULL;
 
-    // 1. 获取当前 Shim 的加载信息，以便找到它所在的设备句柄
+    // 1. 获取当前 Shim 的加载信息
     Status = BS->OpenProtocol(ImageHandle, &gEfiLoadedImageProtocolGuid,
                               (VOID **)&LoadedImage, ImageHandle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
     if (EFI_ERROR(Status)) {
@@ -282,7 +247,7 @@ EFI_STATUS LoadDriverFromFile(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
         return Status;
     }
 
-    // 2. 打开该设备的简单文件系统协议
+    // 2. 打开文件系统
     Status = BS->OpenProtocol(LoadedImage->DeviceHandle,
                               &gEfiSimpleFileSystemProtocolGuid,
                               (VOID **)&FileSystem, ImageHandle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
@@ -301,11 +266,11 @@ EFI_STATUS LoadDriverFromFile(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
     // 4. 打开驱动文件
     Status = RootDir->Open(RootDir, &FileHandle, FileName, EFI_FILE_MODE_READ, 0);
     if (EFI_ERROR(Status)) {
-        // 文件不存在是常见情况，不打印错误以免刷屏
+        // 文件未找到，不打印错误，直接返回
         return EFI_NOT_FOUND;
     }
 
-    // 5. 获取文件大小以便分配内存
+    // 5. 获取文件大小
     Status = BS->AllocatePool(EfiBootServicesData, FileInfoSize, (VOID **)&FileInfo);
     if (EFI_ERROR(Status)) goto cleanup;
 
@@ -314,8 +279,9 @@ EFI_STATUS LoadDriverFromFile(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
     
     FileSize = FileInfo->FileSize;
     BS->FreePool(FileInfo);
+    FileInfo = NULL;
 
-    // 6. 读取文件到内存
+    // 6. 读取文件
     Status = BS->AllocatePool(EfiBootServicesData, FileSize, &FileBuffer);
     if (EFI_ERROR(Status)) goto cleanup;
 
@@ -325,33 +291,31 @@ EFI_STATUS LoadDriverFromFile(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
         goto cleanup;
     }
 
-    // 7. 加载驱动镜像
+    // 7. 加载并启动驱动
     Status = BS->LoadImage(FALSE, ImageHandle, NULL, FileBuffer, FileSize, &DriverHandle);
-    BS->FreePool(FileBuffer); // 读取完成后缓冲区即可释放
+    BS->FreePool(FileBuffer); 
 
     if (EFI_ERROR(Status)) {
         console_print(L"LoadImage failed for %s: %r\n", FileName, Status);
         goto cleanup;
     }
 
-    // 8. 启动驱动
     Status = BS->StartImage(DriverHandle, NULL, NULL);
     if (EFI_ERROR(Status)) {
         console_print(L"StartImage failed for %s: %r\n", FileName, Status);
         goto cleanup;
     }
 
-    console_print(L"Driver %s loaded successfully from disk.\n", FileName);
+    console_print(L"Driver %s loaded successfully.\n", FileName);
     Status = EFI_SUCCESS;
 
 cleanup:
+    if (FileInfo) BS->FreePool(FileInfo);
     if (FileHandle) FileHandle->Close(FileHandle);
-    return Status; 
-}
+    return Status;
 
-// =================================================================
-// 4. 主请求函数
-// =================================================================
+  
+}
 
 EFI_STATUS 
 send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
