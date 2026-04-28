@@ -227,7 +227,7 @@ typedef struct _EFI_FIRMWARE_VOLUME2_PROTOCOL {
 } EFI_FIRMWARE_VOLUME2_PROTOCOL;
 
 // =================================================================
-// 2. GUID 定义
+// 2. GUID 定义 (修正：添加了 HTTP Service Binding)
 // =================================================================
 
 // Firmware Volume Protocol GUID
@@ -245,6 +245,11 @@ static EFI_GUID gHttpDxeFileGuid =
 // TCP Service Binding GUID
 static EFI_GUID gEfiTcp4ServiceBindingProtocolGuid = 
     { 0x00720665, 0x67EB, 0x4A99, { 0xBA, 0xF7, 0xD3, 0xC3, 0x2E, 0x2C, 0x12, 0x43 } };
+
+// 【新增】HTTP Service Binding GUID
+// GUID: bdc8176e-4bcd-4033-bea2-43a32c73534c
+static EFI_GUID gEfiHttpServiceBindingProtocolGuid = 
+    { 0xbdc8176e, 0x4bcd, 0x4033, { 0xbe, 0xa2, 0x43, 0xa3, 0x2c, 0x73, 0x53, 0x4c } };
 
 // 为了兼容您的代码宏，定义别名
 #define EFI_TCP_BINDING_GUID  gEfiTcp4ServiceBindingProtocolGuid
