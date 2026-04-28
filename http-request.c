@@ -261,64 +261,92 @@ static EFI_GUID gEfiHttpServiceBindingProtocolGuid =
 // 3. 驱动加载函数
 // =================================================================
 
-EFI_STATUS LoadDriverFromFirmware(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
+EFI_STATUS LoadDriverFromFile(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
 {
-    EFI_STATUS Status;
-    UINTN NumHandles = 0;
-    EFI_HANDLE *HandleBuffer = NULL;
-    EFI_FIRMWARE_VOLUME2_PROTOCOL *Fv = NULL;
-    
-    VOID *DriverBuffer = NULL;
-    UINTN DriverSize = 0;
-    UINT32 AuthenticationStatus; 
-    
+  EFI_STATUS Status;
+    EFI_LOADED_IMAGE_PROTOCOL *LoadedImage = NULL;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *FileSystem = NULL;
+    EFI_FILE_PROTOCOL *RootDir = NULL;
+    EFI_FILE_PROTOCOL *FileHandle = NULL;
+    EFI_FILE_INFO *FileInfo = NULL;
+    UINTN FileInfoSize = sizeof(EFI_FILE_INFO) + 512;
+    VOID *FileBuffer = NULL;
+    UINTN FileSize;
     EFI_HANDLE DriverHandle = NULL;
 
-    Status = BS->LocateHandleBuffer(ByProtocol, &gEfiFirmwareVolume2ProtocolGuid,
-                                    NULL, &NumHandles, &HandleBuffer);
-    if (EFI_ERROR(Status)) return Status;
-
-    for (UINTN i = 0; i < NumHandles; i++) {
-        Status = BS->HandleProtocol(HandleBuffer[i], &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv);
-        if (EFI_ERROR(Status)) continue;
-
-        // 这里的 Fv->ReadFile 是函数指针调用
-        Status = Fv->ReadFile(
-                        Fv, 
-                        DriverGuid, 
-                        &DriverBuffer, 
-                        &DriverSize, 
-                        NULL, 
-                        NULL, 
-                        &AuthenticationStatus
-                        );
-        
-        if (!EFI_ERROR(Status) && DriverBuffer && DriverSize > 0) {
-            console_print(L"Found driver in ROM (Size: %lu), loading...\n", DriverSize);
-            
-            Status = BS->LoadImage(FALSE, ImageHandle, NULL, DriverBuffer, DriverSize, &DriverHandle);
-            BS->FreePool(DriverBuffer);
-
-            if (EFI_ERROR(Status)) {
-                console_print(L"LoadImage failed: %r\n", Status);
-                continue;
-            }
-
-            Status = BS->StartImage(DriverHandle, NULL, NULL);
-            if (!EFI_ERROR(Status)) {
-                console_print(L"Driver started successfully.\n");
-                BS->FreePool(HandleBuffer);
-                return EFI_SUCCESS;
-            } else {
-                console_print(L"StartImage failed: %r\n", Status);
-                BS->FreePool(HandleBuffer);
-                return Status;
-            }
-        }
+    // 1. 获取当前 Shim 的加载信息，以便找到它所在的设备句柄
+    Status = BS->OpenProtocol(ImageHandle, &gEfiLoadedImageProtocolGuid,
+                              (VOID **)&LoadedImage, ImageHandle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+    if (EFI_ERROR(Status)) {
+        console_print(L"Cannot get LoadedImage: %r\n", Status);
+        return Status;
     }
 
-    if (HandleBuffer) BS->FreePool(HandleBuffer);
-    return EFI_NOT_FOUND;
+    // 2. 打开该设备的简单文件系统协议
+    Status = BS->OpenProtocol(LoadedImage->DeviceHandle,
+                              &gEfiSimpleFileSystemProtocolGuid,
+                              (VOID **)&FileSystem, ImageHandle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+    if (EFI_ERROR(Status)) {
+        console_print(L"Cannot open FileSystem: %r\n", Status);
+        return Status;
+    }
+
+    // 3. 打开根目录
+    Status = FileSystem->OpenVolume(FileSystem, &RootDir);
+    if (EFI_ERROR(Status)) {
+        console_print(L"Cannot open RootDir: %r\n", Status);
+        return Status;
+    }
+
+    // 4. 打开驱动文件
+    Status = RootDir->Open(RootDir, &FileHandle, FileName, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(Status)) {
+        // 文件不存在是常见情况，不打印错误以免刷屏
+        return EFI_NOT_FOUND;
+    }
+
+    // 5. 获取文件大小以便分配内存
+    Status = BS->AllocatePool(EfiBootServicesData, FileInfoSize, (VOID **)&FileInfo);
+    if (EFI_ERROR(Status)) goto cleanup;
+
+    Status = FileHandle->GetInfo(FileHandle, &gEfiFileInfoGuid, &FileInfoSize, FileInfo);
+    if (EFI_ERROR(Status)) goto cleanup;
+    
+    FileSize = FileInfo->FileSize;
+    BS->FreePool(FileInfo);
+
+    // 6. 读取文件到内存
+    Status = BS->AllocatePool(EfiBootServicesData, FileSize, &FileBuffer);
+    if (EFI_ERROR(Status)) goto cleanup;
+
+    Status = FileHandle->Read(FileHandle, &FileSize, FileBuffer);
+    if (EFI_ERROR(Status)) {
+        BS->FreePool(FileBuffer);
+        goto cleanup;
+    }
+
+    // 7. 加载驱动镜像
+    Status = BS->LoadImage(FALSE, ImageHandle, NULL, FileBuffer, FileSize, &DriverHandle);
+    BS->FreePool(FileBuffer); // 读取完成后缓冲区即可释放
+
+    if (EFI_ERROR(Status)) {
+        console_print(L"LoadImage failed for %s: %r\n", FileName, Status);
+        goto cleanup;
+    }
+
+    // 8. 启动驱动
+    Status = BS->StartImage(DriverHandle, NULL, NULL);
+    if (EFI_ERROR(Status)) {
+        console_print(L"StartImage failed for %s: %r\n", FileName, Status);
+        goto cleanup;
+    }
+
+    console_print(L"Driver %s loaded successfully from disk.\n", FileName);
+    Status = EFI_SUCCESS;
+
+cleanup:
+    if (FileHandle) FileHandle->Close(FileHandle);
+    return Status; 
 }
 
 // =================================================================
@@ -339,22 +367,22 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
         return EFI_INVALID_PARAMETER;
     }
 
-    // --- 步骤 1: 强制加载 TCP 驱动 ---
+	// --- 1. 确保 TCP 加载 (优先从磁盘) ---
     efi_status = BS->LocateProtocol(&EFI_TCP_BINDING_GUID, NULL, &dummy_ptr);
     if (EFI_ERROR(efi_status)) {
-        console_print(L"TCP Driver not in memory. Loading from Firmware...\n");
-        efi_status = LoadDriverFromFirmware(image_handle, &EFI_TCP_FILE_GUID);
+        console_print(L"TCP missing. Trying to load from disk \\EFI\\BOOT\\TcpDxe.efi...\n");
+        efi_status = LoadDriverFromFile(image_handle, L"\\EFI\\BOOT\\TcpDxe.efi");
         if (EFI_ERROR(efi_status)) {
-            console_print(L"FATAL: Could not load TcpDxe: %r\n", efi_status);
+            console_print(L"Failed to load TcpDxe.efi: %r\n", efi_status);
             return efi_status;
         }
     }
 
-    // --- 步骤 2: 强制加载 HTTP 驱动 ---
+    // --- 2. 确保 HTTP 加载 (优先从磁盘) ---
     efi_status = BS->LocateProtocol(&EFI_HTTP_BINDING_GUID, NULL, &dummy_ptr);
     if (EFI_ERROR(efi_status)) {
-        console_print(L"HTTP Driver not in memory. Loading from Firmware...\n");
-        LoadDriverFromFirmware(image_handle, &EFI_HTTP_FILE_GUID);
+        console_print(L"HTTP missing. Trying to load from \\EFI\\BOOT\\HttpDxe.efi)...\n");
+        LoadDriverFromFile(image_handle, L"\\EFI\\BOOT\\HttpDxe.efi");
     }
 
     // --- 步骤 3: 查找网卡 ---
