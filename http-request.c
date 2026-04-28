@@ -199,37 +199,62 @@ wait_until_get_iface_info(EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol,
 	}
 }
 
-/*
-	Add Firmware_Volume_Protocol GUID
-*/
-static EFI_GUID gEfiFirmwareVolume2ProtocolGuid = { 0x220e73b6, 0x6bdb, 0x4413, { 0x84, 0x5, 0xb9, 0x74, 0xb1, 0x8, 0x61, 0x90 } };
-typedef EFI_STATUS _EFI_FIRMWARE_VOLUME2_PROTOCOL EFI_FIRMWARE_VOLUME2_PROTOCOL;
+// =================================================================
+// 1. 修复 gnu-efi 缺失的类型定义 (修正编译顺序)
+// =================================================================
 
+// A. 先声明结构体标签，这样函数指针里就可以引用它了
+struct _EFI_FIRMWARE_VOLUME2_PROTOCOL;
+
+// B. 定义函数指针类型
 typedef
 EFI_STATUS
 (EFIAPI *EFI_FV_READ_FILE) (
-	IN struct _EFI_FIRMWARE_VOLUME2_PROTOCOL *This,
-	IN EFI_GUID *NameGuid,
-	IN OUT VOID **Buffer,
-	IN OUT UINTN *BufferSize,
-	OUT UINT32 *FoundType,
-	OUT UINT32 *FileAttributes,
-	OUT UINT32 *AuthenticationStatus
-)
+    IN struct _EFI_FIRMWARE_VOLUME2_PROTOCOL *This,
+    IN EFI_GUID *NameGuid,
+    IN OUT VOID **Buffer,
+    IN OUT UINTN *BufferSize,
+    OUT UINT32 *FoundType,
+    OUT UINT32 *FileAttributes,
+    OUT UINT32 *AuthenticationStatus
+);
 
-typedef struct _EFI_FIRMWARE_VOULME2_PROTOCOL {
-	VOID *GetVolumnAttributes;
-	VOID *SetVolumnAttributes;
-	EFI_FV_READ_FILE ReadFile;
+// C. 最后定义结构体本身
+typedef struct _EFI_FIRMWARE_VOLUME2_PROTOCOL {
+    VOID *GetVolumeAttributes;  // 占位
+    VOID *SetVolumeAttributes;  // 占位
+    EFI_FV_READ_FILE ReadFile;  // 我们需要的核心函数
 } EFI_FIRMWARE_VOLUME2_PROTOCOL;
 
-/*
-	从固件卷中读取指定的GUID的驱动并加载
-	@param ImageHandle 		Shim的Image Handle
-	@param DriverGuid		要加载的驱动文件的GUID
+// =================================================================
+// 2. GUID 定义
+// =================================================================
 
-	@retval EFI_SUCCESS		驱动加载并启动成功
-*/
+// Firmware Volume Protocol GUID
+static EFI_GUID gEfiFirmwareVolume2ProtocolGuid = 
+    { 0x220e73b6, 0x6bdb, 0x4413, { 0x84, 0x5, 0xb9, 0x74, 0xb1, 0x8, 0x61, 0x90 } };
+
+// TcpDxe 文件 GUID (来自您的 UEFITool)
+static EFI_GUID gTcpDxeFileGuid = 
+    { 0x1A7E4468, 0x2F55, 0x4A56, { 0x90, 0x3C, 0x01, 0x26, 0x5E, 0xB7, 0x62, 0x2B } };
+
+// HttpDxe 文件 GUID (标准 GUID)
+static EFI_GUID gHttpDxeFileGuid = 
+    { 0xA6146931, 0xD233, 0x4340, { 0x9B, 0x2, 0x94, 0x65, 0xB, 0xAE, 0x75, 0x75 } };
+
+// TCP Service Binding GUID
+static EFI_GUID gEfiTcp4ServiceBindingProtocolGuid = 
+    { 0x00720665, 0x67EB, 0x4A99, { 0xBA, 0xF7, 0xD3, 0xC3, 0x2E, 0x2C, 0x12, 0x43 } };
+
+// 为了兼容您的代码宏，定义别名
+#define EFI_TCP_BINDING_GUID  gEfiTcp4ServiceBindingProtocolGuid
+#define EFI_HTTP_BINDING_GUID gEfiHttpServiceBindingProtocolGuid
+#define EFI_TCP_FILE_GUID     gTcpDxeFileGuid
+#define EFI_HTTP_FILE_GUID    gHttpDxeFileGuid
+
+// =================================================================
+// 3. 驱动加载函数
+// =================================================================
 
 EFI_STATUS LoadDriverFromFirmware(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
 {
@@ -240,7 +265,7 @@ EFI_STATUS LoadDriverFromFirmware(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
     
     VOID *DriverBuffer = NULL;
     UINTN DriverSize = 0;
-    UINT32 AuthenticationStatus; // 修正：UINTN32 -> UINT32
+    UINT32 AuthenticationStatus; 
     
     EFI_HANDLE DriverHandle = NULL;
 
@@ -252,7 +277,7 @@ EFI_STATUS LoadDriverFromFirmware(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
         Status = BS->HandleProtocol(HandleBuffer[i], &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv);
         if (EFI_ERROR(Status)) continue;
 
-        // 修正：去除末尾的分号，补全括号
+        // 这里的 Fv->ReadFile 是函数指针调用
         Status = Fv->ReadFile(
                         Fv, 
                         DriverGuid, 
@@ -267,7 +292,7 @@ EFI_STATUS LoadDriverFromFirmware(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
             console_print(L"Found driver in ROM (Size: %lu), loading...\n", DriverSize);
             
             Status = BS->LoadImage(FALSE, ImageHandle, NULL, DriverBuffer, DriverSize, &DriverHandle);
-            BS->FreePool(DriverBuffer); // 释放读取缓冲区
+            BS->FreePool(DriverBuffer);
 
             if (EFI_ERROR(Status)) {
                 console_print(L"LoadImage failed: %r\n", Status);
@@ -290,360 +315,157 @@ EFI_STATUS LoadDriverFromFirmware(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
     if (HandleBuffer) BS->FreePool(HandleBuffer);
     return EFI_NOT_FOUND;
 }
-// EFI_STATUS
-// LoadDriverFromFirmware(EFI_HANDLE ImageHandle, EFI_GUID *DriverGuid)
-// {
-// 	EFI_STATUS Status;
-// 	UINTN NumHandles = 0;
-// 	EFI_HANDLE *HandleBuffer = NULL;
-// 	EFI_FIRMWARE_VOLUME2_PROTOCOL *Fv = NULL;
 
-// 	VOID *DriverBuffer = NULL;
-// 	UINTN DriverSize = 0;
-// 	UINT32 AuthenticationStatus;
-
-// 	EFI_HANDLE DriverHandle = NULL;
-
-// 	// 1. Search all Firmware Volume Protocol
-// 	Status = BS->LocateHandleBuffer(ByProtocol, &gEfiFirmwareVolume2ProtocolGuid,
-// 		NULL, &NumHandles, &HandleBuffer);
-// 	if (EFI_ERROR(Status) || NumHandles == 0) {
-// 		console_print(L"Error: No Firmware Volume Protocol found.\n");
-// 		return Status;
-// 	}
-
-// 	// 2. 遍历所有的固件卷
-// 	for (UINTN i = 0; i < NumHandles; i++) {
-// 		Status = BS->HandleProtocol(HandleBuffer[i], &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv);
-// 		if (EFI_ERROR(Status)) continue;
-
-// 		// 3. Read drive files
-// 		Status = Fv->ReadFile(
-// 			Fv, DriverGuid, &DriverBuffer, &DriverSize, NULL, NULL, &AuthenticationStatus;)
-// 		if (!EFI_ERROR(Status) && DriverBuffer && DriverSize > 0) {
-// 			console_print(L"Found driver in FV (Size: %lu bytes). Loading...\n",DriverSize);
-
-// 			// 4. Load driver into memory
-// 			Status = BS->LoadImage(
-// 				FALSE,
-// 				ImageHandle,
-// 				NULL,
-// 				DriverBuffer,
-// 				DriverSize,
-// 				&DriverHandle
-// 			);
-
-// 			BS->FreePool(DriverBuffer);			
-
-// 			if (EFI_ERROR(Status)) {
-// 				console_print(L"LoadImage failed: %r\n",Status);
-// 				continue;
-// 			}
-
-// 			// 5. Boot Driver
-// 			Status = BS->StartImage(DriverHandle, NULL, NULL);
-// 			if (!EFI_ERROR(Status)) {
-// 				console_print(L"Driver started successfully.\n");
-// 				BS->FreePool(HandleBuffer);
-// 				return EFI_SUCCESS;
-// 			} else {
-// 				console_print(L"StartImage failed: %r\n",Status);
-// 				BS->FreePool(HandleBuffer);
-// 				return Status;
-// 			}
-// 		}
-// 	}
-
-// 	if (HandleBuffer) BS->FreePool(HandleBuffer);
-// 	return EFI_NOT_FOUND
-// }
+// =================================================================
+// 4. 主请求函数
+// =================================================================
 
 EFI_STATUS 
 send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 {
-	EFI_STATUS efi_status;
-	EFI_STATUS last_error = EFI_NOT_FOUND;
-	UINTN count=0;
-	EFI_HANDLE *handles = NULL;
-	BOOLEAN got_response = FALSE;
-	VOID *dummy_ptr = NULL;
+    EFI_STATUS efi_status;
+    EFI_STATUS last_error = EFI_NOT_FOUND;
+    UINTN count = 0;
+    EFI_HANDLE *handles = NULL;
+    BOOLEAN got_response = FALSE;
+    VOID *dummy_ptr = NULL;
 
-	if (uri == NULL) {
-		return EFI_INVALID_PARAMETER;
-	}
+    if (uri == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
 
-	efi_status = BS->LocateProtocol(&EFI_TCP_BINDING_GUID, NULL, &dummy_ptr);
-	if (EFI_ERROR(efi_status)) {
-		console_print(L"TCP Driver not in memory. Loading from Firmware...\n");
-		efi_status = LoadDriverFromFirmware(image_handle,&EFI_TCP_FILE_GUID);
-		if (EFI_ERROR(efi_status)) {
-			console_print(L"Fatal: Could not load TcpDxe from firmware: %r\n", efi_status);
-			return efi_status;
-		}
-	}
-	
-	efi_status = BS->LocateProtocol(&EFI_HTTP_BINDING_GUID, NULL, &dummy_ptr);
-	if (EFI_ERROR(efi_status)) {
-		console_print(L"HTTP Driver not in memory. Loading from Firmware...\n");
-		LoadDriverFromFirmware(image_handle, &EFI_HTTP_FILE_GUID);
-	}
+    // --- 步骤 1: 强制加载 TCP 驱动 ---
+    efi_status = BS->LocateProtocol(&EFI_TCP_BINDING_GUID, NULL, &dummy_ptr);
+    if (EFI_ERROR(efi_status)) {
+        console_print(L"TCP Driver not in memory. Loading from Firmware...\n");
+        efi_status = LoadDriverFromFirmware(image_handle, &EFI_TCP_FILE_GUID);
+        if (EFI_ERROR(efi_status)) {
+            console_print(L"FATAL: Could not load TcpDxe: %r\n", efi_status);
+            return efi_status;
+        }
+    }
 
-	// Construct Network from bottom to top.
-	// Search IP4_CONFIG2 Protocol first.
-	efi_status = BS->LocateHandleBuffer(ByProtocol, &EFI_IP4_CONFIG2_GUID,
-		NULL, &count, &handles);
-	if (EFI_ERROR(efi_status) || count == 0) {
-		perror(L"Failed to find any network interfaces (IP4_CONFIG2): %r\n", efi_status);
-		return EFI_NOT_FOUND;
-	} 
+    // --- 步骤 2: 强制加载 HTTP 驱动 ---
+    efi_status = BS->LocateProtocol(&EFI_HTTP_BINDING_GUID, NULL, &dummy_ptr);
+    if (EFI_ERROR(efi_status)) {
+        console_print(L"HTTP Driver not in memory. Loading from Firmware...\n");
+        LoadDriverFromFirmware(image_handle, &EFI_HTTP_FILE_GUID);
+    }
 
-	console_print(L"Found %u network interface(s)\n",count);
+    // --- 步骤 3: 查找网卡 ---
+    efi_status = BS->LocateHandleBuffer(ByProtocol, &EFI_IP4_CONFIG2_GUID,
+                                        NULL, &count, &handles);
+    if (EFI_ERROR(efi_status) || count == 0) {
+        perror(L"Failed to find any network interfaces (IP4_CONFIG2): %r\n", efi_status);
+        return EFI_NOT_FOUND;
+    } 
 
-	for (UINTN i = 0; i < count; i++) {
-		EFI_HANDLE current_handle = handles[i];
-		EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol = NULL;
-		EFI_IP4_CONFIG2_INTERFACE_INFO *ip4_cfg2_iface_info = NULL;
+    console_print(L"Found %u network interface(s)\n", count);
 
-		// Open IP4_CONFIG2 protocol
-		efi_status = BS->OpenProtocol(current_handle, &EFI_IP4_CONFIG2_GUID,
-			(void **)&ip4_cfg2_protocol, image_handle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
-		if (EFI_ERROR(efi_status)) {
-			goto next_handle;
-		}
+    for (UINTN i = 0; i < count; i++) {
+        EFI_HANDLE current_handle = handles[i];
+        EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol = NULL;
+        EFI_IP4_CONFIG2_INTERFACE_INFO *ip4_cfg2_iface_info = NULL;
 
-		// Check IP address and DHCP logic
-		efi_status = ip4_cfg2_get_data(ip4_cfg2_protocol, Ip4Config2DataTypeInterfaceInfo,
-			(void **)&ip4_cfg2_iface_info);
-		if (EFI_ERROR(efi_status) || ip4_cfg2_iface_info == NULL) {
-			goto next_handle;
-		}
+        efi_status = BS->OpenProtocol(current_handle, &EFI_IP4_CONFIG2_GUID,
+                                      (void **)&ip4_cfg2_protocol, image_handle, NULL, 
+                                      EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+        if (EFI_ERROR(efi_status)) {
+            goto next_handle;
+        }
 
-		if (!check_ip4_addr(ip4_cfg2_iface_info)) {
-			// Try DHCP
-			efi_status = ip4_cfg2_protocol -> SetData (
-				ip4_cfg2_protocol, Ip4Config2DataTypePolicy,
-				sizeof(EFI_IP4_CONFIG2_POLICY),
-				&(EFI_IP4_CONFIG2_POLICY){ Ip4Config2PolicyDhcp});
-			
-			if (EFI_ERROR(efi_status)) {
-				BS->FreePool(ip4_cfg2_iface_info);
-				ip4_cfg2_iface_info = NULL;
-				efi_status = wait_until_get_iface_info(ip4_cfg2_protocol, &ip4_cfg2_iface_info);
-				if (EFI_ERROR(efi_status)) {
-					goto next_handle;
-				}
-			}
-		}
+        efi_status = ip4_cfg2_get_data(ip4_cfg2_protocol, Ip4Config2DataTypeInterfaceInfo,
+                                       (void **)&ip4_cfg2_iface_info);
+        if (EFI_ERROR(efi_status) || ip4_cfg2_iface_info == NULL) {
+            goto next_handle;
+        }
 
-		// CHeck if handle support HTTP_SERVICE_BINDING
-		efi_status = BS->OpenProtocol(current_handle, &EFI_HTTP_BINDING_GUID,
-			&dummy_ptr, image_handle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
-		if (EFI_ERROR(efi_status)) {
-			console_print(L"HTTP not found. Forcing driver stack connection...\n");
-			BS->ConnectController(current_handle, NULL, NULL, TRUE);
-		} else{
-			BS->CloseProtocol(current_handle, &EFI_HTTP_BINDING_GUID, image_handle, NULL);
-		}
+        if (!check_ip4_addr(ip4_cfg2_iface_info)) {
+            efi_status = ip4_cfg2_protocol->SetData(
+                ip4_cfg2_protocol, Ip4Config2DataTypePolicy,
+                sizeof(EFI_IP4_CONFIG2_POLICY),
+                &(EFI_IP4_CONFIG2_POLICY){ Ip4Config2PolicyDhcp });
+            
+            if (!EFI_ERROR(efi_status)) {
+                BS->FreePool(ip4_cfg2_iface_info);
+                ip4_cfg2_iface_info = NULL;
+                efi_status = wait_until_get_iface_info(ip4_cfg2_protocol, &ip4_cfg2_iface_info);
+                if (EFI_ERROR(efi_status)) {
+                    perror(L"DHCP failed: %r\n", efi_status);
+                    goto next_handle;
+                }
+            }
+        }
 
-		efi_status = BS->OpenProtocol(current_handle, &EFI_TCP_BINDING_GUID, 
-			&dummy_ptr, image_handle, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
-		if (EFI_ERROR(efi_status)) {
-			console_print(L"TCP not bound to this interface. Forcing connection...\n");
-			console_print(L"This means TcpDxe is NOT in my firmware or failed to load.\n");
-			last_error = EFI_UNSUPPORTED;
-			goto next_handle;
-		}
-		BS->CloseProtocol(current_handle, &EFI_TCP_BINDING_GUID, image_handle, NULL);
+        // --- 步骤 4: 绑定驱动 ---
+        efi_status = BS->OpenProtocol(current_handle, &EFI_HTTP_BINDING_GUID,
+                                      &dummy_ptr, image_handle, NULL, 
+                                      EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+        
+        if (EFI_ERROR(efi_status)) {
+            console_print(L"Binding drivers to interface...\n");
+            BS->ConnectController(current_handle, NULL, NULL, TRUE);
+        } else {
+            BS->CloseProtocol(current_handle, &EFI_HTTP_BINDING_GUID, image_handle, NULL);
+        }
 
-		// Start sending request
-		VOID *data = NULL;
-		UINT64 datasize = 0;
+        // --- 步骤 5: 最终验证 ---
+        efi_status = BS->OpenProtocol(current_handle, &EFI_TCP_BINDING_GUID, 
+                                      &dummy_ptr, image_handle, NULL, 
+                                      EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+        if (EFI_ERROR(efi_status)) {
+            console_print(L"CRITICAL: TCP still missing after Connect.\n");
+            last_error = EFI_UNSUPPORTED;
+            goto next_handle;
+        }
+        BS->CloseProtocol(current_handle, &EFI_TCP_BINDING_GUID, image_handle, NULL);
 
-		efi_status = httpboot_fetch_buffer_uri(image_handle, current_handle,
-			uri, &data, &datasize);
-		if (EFI_ERROR(efi_status)) {
-			perror(L"Failed to fetch buffer: %r\n",efi_status);
-			last_error = efi_status;
-			goto next_handle;
-		}
+        // --- 步骤 6: 发送请求 ---
+        VOID *data = NULL;
+        UINT64 datasize = 0;
 
-		// Receive response
-		if (data && datasize > 0) {
-			CHAR8 *safe_str = AllocatePool(datasize + 1);
-			if (safe_str) {
-				CopyMem(safe_str, data, datasize);
-				safe_str[datasize] = '\0';
-				console_print(L"Get http response body: %a\n", safe_str);
-				FreePool(safe_str);
-			}
-			FreePool(data);
-			got_response = TRUE;
-			last_error = EFI_SUCCESS;
-		}
+        console_print(L"Sending HTTP request...\n");
+        efi_status = httpboot_fetch_buffer_uri(image_handle, current_handle,
+                                               uri, &data, &datasize);
+        if (EFI_ERROR(efi_status)) {
+            perror(L"Failed to fetch buffer: %r\n", efi_status);
+            last_error = efi_status;
+            goto next_handle;
+        }
+
+        if (data && datasize > 0) {
+            CHAR8 *safe_str = AllocatePool(datasize + 1);
+            if (safe_str) {
+                CopyMem(safe_str, data, datasize);
+                safe_str[datasize] = '\0';
+                console_print(L"Get http response body: %a\n", safe_str);
+                FreePool(safe_str);
+            }
+            FreePool(data);
+            got_response = TRUE;
+            last_error = EFI_SUCCESS;
+        }
+
 next_handle:
-		if (ip4_cfg2_iface_info) {
-			BS->FreePool(ip4_cfg2_iface_info);
-			ip4_cfg2_iface_info = NULL;
-		}
-		if (ip4_cfg2_protocol) {
-			BS->CloseProtocol(current_handle, &EFI_IP4_CONFIG2_GUID,
-				image_handle, NULL);
-		}
-		if (got_response) {
-			break;
-		}
-	}
+        if (ip4_cfg2_iface_info) {
+            BS->FreePool(ip4_cfg2_iface_info);
+            ip4_cfg2_iface_info = NULL;
+        }
+        if (ip4_cfg2_protocol) {
+            BS->CloseProtocol(current_handle, &EFI_IP4_CONFIG2_GUID,
+                              image_handle, NULL);
+        }
+        if (got_response) {
+            break;
+        }
+    }
 
-	if (handles) {
-		BS->FreePool(handles);
-	}
+    if (handles) {
+        BS->FreePool(handles);
+    }
 
-	return got_response ? EFI_SUCCESS : last_error;
+    return got_response ? EFI_SUCCESS : last_error;
 }
-
-// EFI_STATUS
-// send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
-// {
-// 	EFI_STATUS efi_status;
-
-//     BOOLEAN got_response = FALSE;
-//     EFI_STATUS last_error = EFI_NOT_FOUND;
-
-// 	UINTN count = 0;
-// 	EFI_HANDLE *http_binding_handles = NULL;
-
-//     if (uri == NULL) {
-//         return EFI_INVALID_PARAMETER;
-//     }
-
-// 	efi_status = BS->LocateHandleBuffer(ByProtocol, &EFI_HTTP_BINDING_GUID,
-// 	                                    NULL, &count, &http_binding_handles);
-// 	if (EFI_ERROR(efi_status)) {
-// 		perror(L"Failed to get http binding handles: %r\n", efi_status);
-// 		return efi_status;
-// 	}
-// 	if (count == 0 || http_binding_handles == NULL) {
-//         if (http_binding_handles) {
-//             BS->FreePool(http_binding_handles);
-//         }
-// 		return EFI_NOT_FOUND;
-// 	}
-    
-//     console_print(L"Found %u HTTP binding handle(s)\n", count);
-
-// 	for (UINTN i = 0; i < count; i++) {
-// 		efi_status =
-// 			print_device_path(image_handle, http_binding_handles[i]);
-// 		if (EFI_ERROR(efi_status)) {
-// 			perror(L"Failed to print device path\n");
-// 			goto next_handle;
-// 		}
-// 		EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol = NULL;
-// 		efi_status = BS->OpenProtocol(http_binding_handles[i],
-// 		                              &EFI_IP4_CONFIG2_GUID,
-// 		                              (void **)&ip4_cfg2_protocol,
-// 		                              image_handle, NULL,
-// 		                              EFI_OPEN_PROTOCOL_GET_PROTOCOL);
-// 		if (EFI_ERROR(efi_status) || ip4_cfg2_protocol == NULL) {
-// 			perror(L"Failed to open ip4 config2 protorol: %r\n",efi_status);
-//             last_error = efi_status;
-// 			goto next_handle;
-// 		}
-// 		EFI_IP4_CONFIG2_INTERFACE_INFO *ip4_cfg2_iface_info = NULL;
-// 		efi_status = ip4_cfg2_get_data(ip4_cfg2_protocol,
-// 		                               Ip4Config2DataTypeInterfaceInfo,
-// 		                               (void **)&ip4_cfg2_iface_info);
-// 		if (EFI_ERROR(efi_status) || ip4_cfg2_iface_info == NULL) {
-// 			perror(L"Failed to open ip4 config2 protorol: %r\n",efi_status);
-//             last_error = efi_status;
-// 			goto next_handle;
-// 		}
-
-// 		if (check_ip4_addr(ip4_cfg2_iface_info)) {
-// 			print_ip4_addr_verbose(ip4_cfg2_iface_info);
-// 		} else {
-// 			efi_status = ip4_cfg2_protocol->SetData(
-// 				ip4_cfg2_protocol, Ip4Config2DataTypePolicy,
-// 				sizeof(EFI_IP4_CONFIG2_POLICY),
-// 				&(EFI_IP4_CONFIG2_POLICY){
-// 					Ip4Config2PolicyDhcp });
-// 			if (EFI_ERROR(efi_status)) {
-// 				perror(L"Failed to set DHCP policy: %r\n", efi_status);
-//                 last_error = efi_status;
-// 				goto next_handle;
-// 			}
-// 			// Loop until get ip.
-// 			// efi_status = wait_until_get_iface_info(
-// 			// 	ip4_cfg2_protocol, &ip4_cfg2_iface_info);
-// 			// if (EFI_ERROR(efi_status)) {
-// 			// 	perror(L"Failed to get ip4 addr by DHCP\n");
-// 			// 	goto break_loop;
-// 			// }
-            
-//             BS->FreePool(ip4_cfg2_iface_info);
-//             ip4_cfg2_iface_info=NULL;
-            
-//             efi_status = wait_until_get_iface_info(ip4_cfg2_protocol, &ip4_cfg2_iface_info);
-            
-//             if (EFI_ERROR(efi_status)) {
-//                 perror(L"Failed to get IP4 addr by DHCP: %r\n",efi_status);
-//                 last_error = efi_status;
-//                 goto next_handle;
-//             }
-// 		}
-// 		void *data = NULL;
-//         // seems auto append.
-// 		UINT64 datasize = 0;
-// 		efi_status = httpboot_fetch_buffer_uri(image_handle,
-// 		                                       http_binding_handles[i],
-// 		                                       uri, &data, &datasize);
-// 		if (EFI_ERROR(efi_status)) {
-// 			perror(L"Failed to fetch image: %r\n", efi_status);
-//             last_error = efi_status;
-// 			goto next_handle;
-// 		}
-// 	if (data && datasize > 0) {
-// 		CHAR8 *safe_str = AllocatePool(datasize + 1);
-// 		if (safe_str) {
-// 			CopyMem(safe_str, data, datasize);
-// 			safe_str[datasize] = '\0';
-// 			console_print(L"Get http response body:%a\n", safe_str);
-// 			FreePool(safe_str);
-// 		}
-// 	}
-    
-//     got_response = TRUE;
-//     last_error = EFI_SUCCESS;
-
-// next_handle:
-//     if(data){
-//         BS->FreePool(data);
-//         data = NULL;
-//     }
-//     if (ip4_cfg2_iface_info) {
-//         BS->FreePool(ip4_cfg2_iface_info);
-//         ip4_cfg2_iface_info = NULL;
-//     }
-    
-//     if (ip4_cfg2_protocol) {
-//         BS->CloseProtocol(http_binding_handles[i],
-//                 &EFI_IP4_CONFIG2_GUID,
-//                 image_handle, NULL);
-//         ip4_cfg2_protocol = NULL;
-//     }
-    
-//     if (got_response) {
-//         break;
-//     }
-// }
-    
-//     if (http_binding_handles) {
-//         BS->FreePool(http_binding_handles);
-//         http_binding_handles = NULL;
-//     }
-
-// 	return got_response ? EFI_SUCCESS : last_error;
-// }
 
 
 
