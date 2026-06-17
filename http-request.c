@@ -158,6 +158,93 @@ wait_until_get_iface_info(EFI_IP4_CONFIG2_PROTOCOL *ip4_cfg2_protocol,
 }
 
 
+/*
+ * Load missing network drivers (Hash2DxeCrypto, TcpDxe, HttpDxe) from
+ * the same ESP directory where shim is loaded. The RISC-V EDK2 firmware
+ * lacks Hash2DxeCrypto which TcpDxe depends on, so we load them at runtime.
+ */
+static EFI_STATUS
+load_network_drivers(EFI_HANDLE image_handle)
+{
+	EFI_STATUS efi_status;
+	EFI_LOADED_IMAGE *li = NULL;
+	EFI_FILE_IO_INTERFACE *fs = NULL;
+	EFI_FILE *root = NULL;
+	EFI_FILE *fh = NULL;
+	EFI_HANDLE device;
+	static const CHAR16 *drivers[] = {
+		L"\\EFI\\BOOT\\Hash2DxeCrypto.efi",
+		L"\\EFI\\BOOT\\TcpDxe.efi",
+		L"\\EFI\\BOOT\\HttpDxe.efi",
+		NULL
+	};
+	UINTN i;
+
+	efi_status = BS->HandleProtocol(image_handle, &EFI_LOADED_IMAGE_GUID,
+	                                (void **)&li);
+	if (EFI_ERROR(efi_status) || !li)
+		return efi_status;
+
+	device = li->DeviceHandle;
+	efi_status = BS->HandleProtocol(device, &EFI_SIMPLE_FILE_SYSTEM_GUID,
+	                                (void **)&fs);
+	if (EFI_ERROR(efi_status))
+		return efi_status;
+
+	efi_status = fs->OpenVolume(fs, &root);
+	if (EFI_ERROR(efi_status))
+		return efi_status;
+
+	for (i = 0; drivers[i] != NULL; i++) {
+		console_print(L"Loading driver: %s ... ", drivers[i]);
+		efi_status = root->Open(root, &fh, (CHAR16 *)drivers[i],
+		                        EFI_FILE_MODE_READ, 0);
+		if (EFI_ERROR(efi_status)) {
+			console_print(L"Open failed: %r\n", efi_status);
+			continue;
+		}
+
+		/* Get file size */
+		EFI_FILE_INFO *info = NULL;
+		UINTN info_size = 0;
+		efi_status = fh->GetInfo(fh, &EFI_FILE_INFO_GUID,
+		                         &info_size, NULL);
+		if (efi_status == EFI_BUFFER_TOO_SMALL) {
+			info = AllocatePool(info_size);
+			if (info) {
+				efi_status = fh->GetInfo(fh, &EFI_FILE_INFO_GUID,
+				                         &info_size, info);
+			}
+		}
+
+		/* Read file into buffer */
+		VOID *buf = NULL;
+		UINTN buf_size = 0;
+		EFI_HANDLE driver_handle = NULL;
+		if (!EFI_ERROR(efi_status) && info) {
+			buf_size = info->FileSize;
+			buf = AllocatePool(buf_size);
+			if (buf) {
+				efi_status = fh->Read(fh, &buf_size, buf);
+				if (!EFI_ERROR(efi_status)) {
+					efi_status = BS->LoadImage(
+					    FALSE, image_handle, NULL,
+					    buf, buf_size, &driver_handle);
+					if (!EFI_ERROR(efi_status) && driver_handle)
+						BS->StartImage(driver_handle, NULL, NULL);
+				}
+				FreePool(buf);
+			}
+			FreePool(info);
+		}
+		fh->Close(fh);
+		fh = NULL;
+	}
+
+	root->Close(root);
+	return EFI_SUCCESS;
+}
+
 EFI_STATUS
 send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 {
@@ -165,14 +252,25 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 
 	UINTN count = 0;
 	EFI_HANDLE *http_binding_handles = NULL;
-	efi_status = BS->LocateHandleBuffer(ByProtocol, &EFI_HTTP_BINDING_GUID,
-	                                    NULL, &count, &http_binding_handles);
-	if (EFI_ERROR(efi_status)) {
-		perror(L"Failed to get http binding handles\n");
-		return efi_status;
-	}
-	if (!count || !http_binding_handles) {
-		return EFI_NOT_FOUND;
+
+	/* Ensure network drivers are loaded before searching for HTTP binding */
+	load_network_drivers(image_handle);
+
+	/* Retry for up to 30s: newly loaded drivers need time to bind */
+	{
+		int r;
+		for (r = 0; r < 30; r++) {
+			efi_status = BS->LocateHandleBuffer(ByProtocol,
+			            &EFI_HTTP_BINDING_GUID,
+		                    NULL, &count, &http_binding_handles);
+			if (!EFI_ERROR(efi_status) && count > 0)
+				break;
+			BS->Stall(1000000);
+		}
+		if (r >= 30) {
+			perror(L"Timeout waiting for HTTP binding\n");
+			return EFI_NOT_FOUND;
+		}
 	}
 	for (UINTN i = 0; i < count; i++) {
 		efi_status =

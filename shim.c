@@ -700,26 +700,44 @@ verify_buffer_authenticode (char *data, int datasize,
 	// 	ClearErrors();
 	// }
 
+	/*
+	 * HTTP-first verification strategy:
+	 * 1. Try remote HTTP verification first (keyless signature service)
+	 * 2. If HTTP fails, fall back to local DB/Shim/Vendor cert verification
+	 * 3. DB verification below acts as safety net
+	 */
 	CHAR8 *payload = NULL;
 	CHAR8 *signature = NULL;
 	CHAR8 *certificate = NULL;
-	/* osign_parse_pkcs7 will not free data; pass context by value */
-	ret_efi_status = osign_parse_pkcs7(data, size, *context,
+	EFI_STATUS http_status;
+
+	/* Try HTTP remote verification first */
+	http_status = osign_parse_pkcs7(data, size, *context,
 		&payload, &signature, &certificate);
-	if (EFI_ERROR(ret_efi_status)){
-		PrintErrors();
-		ClearErrors();
+	if (!EFI_ERROR(http_status)) {
+		http_status = osign_http_request(global_image_handle,
+				payload, signature, certificate);
+		if (!EFI_ERROR(http_status)) {
+			/* HTTP verification succeeded — binary is trusted */
+			drain_openssl_errors();
+			return http_status;
+		}
+		/* HTTP failed — continue to local DB verification */
+		dprint(L"HTTP verification failed: %r, falling back to DB\n", http_status);
+	}
+
+	/*
+	 * Local DB verification as fallback:
+	 * If HTTP was not tried or failed, check against DB/Shim/Vendor cert.
+	 * ret_efi_status from the signature loop above already reflects
+	 * the local verification result.
+	 */
+	if (ret_efi_status == EFI_SUCCESS) {
+		drain_openssl_errors();
 		return ret_efi_status;
 	}
 
-	ret_efi_status = osign_http_request(global_image_handle,
-			payload, signature, certificate);
-	if (EFI_ERROR(ret_efi_status)){
-		PrintErrors();
-		ClearErrors();
-		return ret_efi_status;
-	}
-
+	/* Both HTTP and local verification failed */
 	drain_openssl_errors();
 	return ret_efi_status;
 }
