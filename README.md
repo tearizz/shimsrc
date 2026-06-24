@@ -235,18 +235,22 @@ gnu-efi 是为每个架构**独立编译**的底层 UEFI 库。
 
 #### 4.2.1 获取 gnu-efi 源码
 
+gnu-efi 上游仓库为 SourceForge 官方仓库，使用 `master` 分支 (当前版本 v3.0.18)。
+本项目未对 gnu-efi 做任何 fork 或修改，直接使用上游代码。
+
 ```bash
 cd /path/to/shimsrc
 
 # 方式一: 使用项目自带的子模块 (推荐)
 git submodule update --init --recursive
 
-# 方式二: 独立 clone (版本: osignRV 分支)
+# 方式二: 独立 clone
 git clone https://git.code.sf.net/p/gnu-efi/code gnu-efi
-cd gnu-efi
-git checkout osignRV
-cd ..
 ```
+
+> **关于分支**：`.gitmodules` 中配置的 `branch = master` 指向的是 gnu-efi
+> 上游唯一的稳定分支。注意：上游仓库**没有** `osignRV` 等自定义分支，所有
+> 架构支持均已包含在 `master` 中。
 
 #### 4.2.2 编译 gnu-efi for riscv64
 
@@ -442,7 +446,10 @@ make keyless-sign.efi ARCH=<x86_64|riscv64>
 
 ## 5. gnu-efi 架构差异详解
 
-gnu-efi 是 shim 与 UEFI 固件之间的**翻译层**，每个架构有独立的实现目录：
+gnu-efi 是 shim 与 UEFI 固件之间的**翻译层**。每个架构有独立的实现目录，
+区别不仅在于"用哪个目录的源码"，更在于底层的**可执行格式生成方式根本不同**。
+
+### 5.1 目录结构对比
 
 ```
 gnu-efi/
@@ -451,47 +458,256 @@ gnu-efi/
 │   │   ├── efibind.h             # MS ABI 调用约定, UEFI 类型映射
 │   │   ├── efilibplat.h          # 平台特定库函数
 │   │   ├── efisetjmp_arch.h      # setjmp/longjmp 汇编
-│   │   └── pe.h                  # PE/COFF 格式定义 (x86 特有)
+│   │   └── pe.h                  # PE/COFF 格式定义 (x86 特有!)
 │   └── riscv64/
-│       ├── efibind.h             # EFI 类型映射 (无 MS ABI)
+│       ├── efibind.h             # EFI 类型映射 (无 MS ABI, 无 PE/COFF 宏)
 │       ├── efilibplat.h
-│       └── efisetjmp_arch.h
+│       └── efisetjmp_arch.h      # (注意: riscv64 没有 pe.h)
 │
 ├── lib/x86_64/
 │   ├── callwrap.c                # MS ABI ↔ SysV ABI 调用转换 (x86 特有!)
-│   ├── efi_stub.S                # EFI 入口汇编 (x86 特有!)
+│   ├── efi_stub.S                # efi_call0..10 汇编 trampoline (x86 特有!)
 │   ├── initplat.c                # 平台初始化
 │   ├── math.c                    # 整数除法和取模
 │   └── setjmp.S                  # setjmp 汇编 (x86)
-└── lib/riscv64/
-    ├── initplat.c                # 平台初始化 (riscv64)
-    ├── math.c
-    └── setjmp.S                  # setjmp 汇编 (riscv64)
+│
+├── lib/riscv64/
+│   ├── initplat.c                # 平台初始化 (riscv64)
+│   ├── math.c
+│   └── setjmp.S                  # setjmp 汇编 (riscv64)
+│
+└── gnuefi/
+    ├── crt0-efi-x86_64.S         # x86_64 CRT0 (~20行, 仅入口汇编)
+    ├── crt0-efi-riscv64.S        # riscv64 CRT0 (~180行, 含完整 PE/COFF 头!)
+    ├── reloc_x86_64.c            # x86_64 重定位逻辑
+    ├── reloc_riscv64.c           # riscv64 重定位逻辑
+    └── ...
 ```
 
-### 关键差异
+### 5.2 核心差异：objcopy 的 PE/COFF 支持
 
-| 维度 | x86_64 | riscv64 |
-|------|--------|---------|
-| **调用约定** | Microsoft x64 (MS ABI) | 标准 C (SysV-like) |
-| **ABI 桥接** | 需要 `callwrap.c` 做 MS↔SysV 转换 | 不需要 |
-| **EFI 入口** | `efi_stub.S` 汇编入口 | CRT0 C 入口 |
-| **可执行格式** | PE/COFF (`--target efi-app-x86_64`) | 原始二进制 (`-O binary`) |
-| **子系统** | 隐式 (PE header) | 显式 `--defsym=EFI_SUBSYSTEM=0xa` |
-| **CRT0 对象** | `crt0-efi-x86_64.o` (标准) | `crt0-efi-riscv64-local.o` (修复版) |
-| **va_list 类型** | `__builtin_ms_va_list` (定制 stdarg.h) | `__builtin_va_list` |
-| **额外链接标志** | `-mno-red-zone -mno-mmx -mno-sse` | `-mno-strict-align` |
+这是 x86_64 和 riscv64 所有差异的**根本原因**：
 
-### 为什么 gnu-efi 必须按架构分别编译
+```
+x86_64 objcopy:
+  elf_x86_64_efi.lds (ELF)  →  objcopy --target efi-app-x86_64  →  PE/COFF
+                                    ▲
+                          objcopy 自动生成 PE 头
+                          自动修正 .reloc 段
+                          自动设置 Machine ID
 
-gnu-efi 库包含汇编代码（入口点、setjmp、调用转换），这些**不能跨架构使用**。
-每个架构的汇编语法、寄存器名称、ABI 约定都不同：
+riscv64 objcopy:
+  elf_riscv64_efi.lds (ELF) →  objcopy -O binary  →  原始二进制
+                                    ▲
+                          无 PE/COFF 支持！
+                          CRT0 必须手写 PE 头
+                          .reloc 段不可被 objcopy 修正
+```
 
-- `lib/x86_64/efi_stub.S` — x86_64 汇编（`movq %rcx, image_handle` 等）
-- `lib/riscv64/setjmp.S` — RISC-V 汇编（`sd ra, 0(a0)` 等）
+因为 GNU objcopy 没有 `efi-app-riscv64` 目标格式，riscv64 必须用 `-O binary`
+输出原始二进制，这意味着一切 PE/COFF 元数据必须由 CRT0 汇编手写。
 
-当你执行 `make ARCH=x86_64` 时，gnu-efi 自动选择 `lib/x86_64/` 下的源文件
-编译。切换 `ARCH=riscv64` 时同理。
+### 5.3 CRT0 深度对比
+
+#### x86_64: `crt0-efi-x86_64.S` (~20 行)
+
+```asm
+# x86_64 CRT0 — 极简入口，所有 PE/COFF 元数据由 objcopy 负责
+_start:
+    subq $8, %rsp
+    pushq %rcx              # image_handle (UEFI 通过 MS ABI rcx 传入)
+    pushq %rdx              # systab        (UEFI 通过 MS ABI rdx 传入)
+    lea  ImageBase(%rip), %rdi
+    lea  _DYNAMIC(%rip), %rsi
+    call _relocate           # ELF 重定位
+    popq %rdi
+    popq %rsi
+    call _entry              # → efi_main(image_handle, systab)
+    ret
+
+  .section .reloc, "a"       # 占位 .reloc 段
+label1:
+    .4byte dummy-label1     # Page RVA (objcopy 会覆盖为正确值)
+    .4byte 12               # Block Size
+    .2byte (IMAGE_REL_ABSOLUTE<<12) + 0
+    .2byte (IMAGE_REL_ABSOLUTE<<12) + 0
+```
+
+objcopy `--target efi-app-x86_64` 会自动完成：
+- 生成 DOS MZ stub 和 PE signature
+- 生成 COFF header (Machine = 0x8664, x86_64)
+- 生成 Optional header (PE32+)
+- 生成 Section table
+- **修正 .reloc 段的 Page RVA**（将 `dummy-label1` 占位值替换为正确的 RVA）
+
+#### riscv64: `crt0-efi-riscv64.S` (~180 行)
+
+```asm
+# riscv64 CRT0 — 手写完整 PE/COFF 头部
+# 因为 objcopy -O binary 不生成任何 PE 元数据
+ImageBase:
+    .ascii "MZ"              # ← DOS 魔数
+    .skip 58                 # DOS stub (无意义的占位)
+    .4byte pe_header - ImageBase
+pe_header:
+    .ascii "PE"              # ← PE 签名
+coff_header:
+    .2byte 0x5064            # ← riscv64 Machine ID (手写!)
+    .2byte 4                 # 段数量
+    .4byte 0                 # TimeDateStamp
+    ...
+optional_header:
+    .2byte 0x20b             # PE32+ Magic
+    ...
+    .8byte 0                 # ImageBase (运行时由 UEFI 填充)
+    .4byte 0x1000            # SectionAlignment
+    .4byte 0x1000            # FileAlignment
+    ...
+    .4byte _reloc - ImageBase              # BaseRelocationTable VA
+    .4byte _reloc_vsize - ImageBase        # BaseRelocationTable Size
+    ...
+section_table:
+    .ascii ".text\0\0\0"     # ← 4 个段条目 (手写!)
+    .ascii ".reloc\0\0"
+    .ascii ".data\0\0\0"
+    .ascii ".rodata\0"
+
+_start:                      # 实际入口点
+    addi  sp, sp, -24
+    sd    a0, 0(sp)          # image_handle (UEFI 通过 riscv a0 传入)
+    sd    a1, 8(sp)          # systab        (UEFI 通过 riscv a1 传入)
+    lla   a0, ImageBase
+    lla   a1, _DYNAMIC
+    call  _relocate
+    call  _entry
+    ret
+
+  .section .reloc, "a"       # 占位 .reloc 段
+label1:
+    .4byte dummy-label1     # ← 这个值 objcopy -O binary 不会修正!
+```
+
+**关键**：riscv64 的 PE 头部中，每个字段都是手写的汇编常量。
+objcopy `-O binary` 只是做 ELF → 原始内存布局的转储，不会修改任何字节。
+
+### 5.4 `.reloc` Page RVA 问题深度解析
+
+两个架构的 CRT0 都有相同的占位代码：
+
+```asm
+  .data
+dummy: .4byte 0               # 位于 .data 段
+
+  .section .reloc, "a"
+label1:
+    .4byte dummy-label1      # = .data段地址 - .reloc段地址
+```
+
+**x86_64 为什么不出问题：**
+
+```
+1. GCC + ld 链接: 计算 dummy - label1 (ELF 符号差值)
+2. objcopy --target efi-app-x86_64:
+   → 读取 ELF 中的 .reloc 段
+   → 识别这是一个 Base Relocation 块
+   → 重新计算正确的 Page RVA (基于 PE 段布局, 不是 ELF 的)
+   → 将修正后的值写入 PE/COFF 文件
+```
+
+**riscv64 为什么出问题：**
+
+```
+1. GCC + ld 链接: 计算 dummy - label1 (ELF 符号差值)
+   → 如果 .data VMA < .reloc VMA (这在 ELF 布局中经常发生)
+   → 差值 = 负数, 如 -0x15000
+   → 在 .reloc 段中存储为 0xFFFFFFFFFFFEB000 (64-bit 无符号)
+2. objcopy -O binary:
+   → 完全不处理 .reloc 段
+   → 直接将负值原样写入二进制文件
+3. UEFI PE 加载器:
+   → 读取 Page RVA = 0xFFFEB000
+   → 尝试映射到虚拟地址 0xFFFEB000
+   → 超出有效地址空间 → "Command Error Status: Unsupported"
+```
+
+`fix_reloc.py` 的修复逻辑就是检测这些负值（被解释为 > 2^31 的无符号整数），
+手动改写为有效的 Page RVA `0x1000`（第一页）。
+
+### 5.5 ABI 调用约定差异
+
+这是 x86_64 独有的复杂度，riscv64 完全不需要。
+
+**问题背景：**
+
+| | System V ABI (GCC 默认) | Microsoft x64 ABI (UEFI) |
+|---|---|---|
+| 第1参数 | `%rdi` | `%rcx` |
+| 第2参数 | `%rsi` | `%rdx` |
+| 第3参数 | `%rdx` | `%r8` |
+| 第4参数 | `%rcx` | `%r9` |
+| 第5参数 | `%r8` | 栈 (32 bytes shadow space) |
+| 第6参数 | `%r9` | 栈 |
+
+GCC 编译 shim 时使用 System V ABI（Linux 默认），但 UEFI 固件期望 Microsoft
+x64 ABI。当 shim 调用 `BS->HandleProtocol()` 这类 UEFI 函数指针时，参数
+寄存器位置不匹配！
+
+**x86_64 的解决方案：`efi_stub.S` + `callwrap.c`**
+
+```asm
+# efi_stub.S: efi_call2 — 2参数 trampoline
+efi_call2:
+    subq $40, %rsp
+    /* mov %rdx, %rdx */   # SysV的rdx → MS的rdx (相同, 不需要移动)
+    mov  %rsi, %rcx         # SysV的rsi → MS的rcx (关键! 参数移动)
+    call *%rdi               # %rdi = 要调用的UEFI函数指针
+    addq $40, %rsp
+    ret
+```
+
+`uefi_call_wrapper()` 宏展开为对应的 `efi_callN()` 调用，将 System V ABI
+的参数搬运到 Microsoft ABI 期望的位置。
+
+**riscv64 不需要桥接：**
+UEFI 和 Linux 在 riscv64 上使用相同的调用约定（`a0`-`a7` 传参），
+`uefi_call_wrapper` 直接展开为 `func(args)`，零开销。
+
+### 5.6 完整差异对照表
+
+| 维度 | x86_64 | riscv64 | 根因 |
+|------|--------|---------|------|
+| **CRT0 行数** | ~20 行 | ~180 行 | riscv64 CRT0 手写 PE 头 |
+| **PE/COFF 头** | objcopy 自动生成 | CRT0 汇编手写嵌入 `.text.head` | objcopy 无 efi-app-riscv64 |
+| **objcopy 格式** | `--target efi-app-x86_64` | `-O binary` | 同上 |
+| **.reloc 修正** | objcopy 自动修正 | 需 `fix_reloc.py` 手动修正 | `-O binary` 不处理 PE 元数据 |
+| **Machine ID** | objcopy 填入 `0x8664` | CRT0 手写 `0x5064` | 同上 |
+| **-local crt0** | ❌ 不需要 | ✅ 需 `cp crt0-efi-riscv64.o → -local.o` | shim Makefile 命名约定 |
+| **callwrap.c** | ✅ 需要 (编入 libgnuefi.a) | ❌ 不需要 | MS ABI ↔ SysV ABI 差异 |
+| **efi_stub.S** | ✅ 需要 (编入 libgnuefi.a) | ❌ 不需要 | 同上 |
+| **pe.h** | ✅ 存在于 `inc/x86_64/` | ❌ 不存在 | riscv64 用 `-O binary`, 非 PE 格式 |
+| **ABI 桥接开销** | 有 (寄存器搬运) | 零 (统一 ABI) | x86_64 UEFI 用 MS ABI |
+| **va_list** | `__builtin_ms_va_list` | `__builtin_va_list` | 同上 |
+| **EFI_SUBSYSTEM** | PE 头内置 | `--defsym=EFI_SUBSYSTEM=0xa` | CRT0 是汇编, 需链接时传入 |
+| **链接脚本** | 简洁, PE 布局由 objcopy 管理 | 复杂, 段布局需与 CRT0 段表**严格对齐** | `.text.head` / `.reloc` / `.data` / `.rodata` 顺序不可变 |
+| **额外编译标志** | `-mno-red-zone` `-mno-mmx` `-mno-sse` | `-mno-strict-align` | CPU 特性差异 |
+
+### 5.7 架构差异原因总结
+
+```
+问题链: objcopy 无 riscv64 PE/COFF 支持
+  │
+  ├─► 必须用 -O binary
+  │     ├─► CRT0 必须手写 PE 头 (180行 vs 20行)
+  │     ├─► PE 头手动嵌入 → .reloc 不可被修正 → fix_reloc.py
+  │     └─► 段布局必须与 CRT0 段表严格一致 → elf_riscv64_efi.lds 更复杂
+  │
+  └─► 与 x86_64 objcopy 的差异 (一切自动, 零额外步骤)
+
+独立问题: x86_64 UEFI 用 Microsoft ABI, Linux 用 System V ABI
+  │
+  ├─► 需要 callwrap.c + efi_stub.S 做寄存器搬运
+  └─► riscv64 UEFI 和 Linux 统一使用相同 ABI, 无需桥接
+```
 
 **shim 本身不需要任何代码修改**，因为 UEFI 抽象层已经通过 gnu-efi 头文件
 （`efi.h`, `efilib.h`）屏蔽了架构差异。你在 shim 中调用的 `BS->HandleProtocol()`
@@ -503,8 +719,8 @@ shim 代码: BS->HandleProtocol(...)
     ▼
 gnu-efi 头文件宏: uefi_call_wrapper(BS->HandleProtocol, ...)
     │
-    ├─ x86_64: 展开为直接函数调用 (MS ABI 兼容)
-    └─ riscv64: 展开为 efi_callX() trampoline
+    ├─ x86_64: 展开为 efi_callN() trampoline (MS ABI 寄存器搬运)
+    └─ riscv64: 展开为直接函数调用 (无 ABI 差异)
 ```
 
 ---
