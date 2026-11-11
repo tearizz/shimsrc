@@ -150,7 +150,7 @@ show_oid(ASN1_OBJECT *asn1_str)
 static BOOLEAN
 extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
                           CHAR8 **out_signed_attrs_b64, CHAR8 **out_sig_b64,
-                          CHAR8 **out_cert_b64)
+                          CHAR8 **out_cert_b64, BOOLEAN *out_keyless)
 {
 	if (!p7 || !PKCS7_type_is_signed(p7))
 		return FALSE;
@@ -162,6 +162,8 @@ extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
 		*out_sig_b64 = NULL;
 	if (out_cert_b64)
 		*out_cert_b64 = NULL;
+	if (out_keyless)
+		*out_keyless = FALSE;
 
 	if (p7 && p7->type) {
 		show_oid(p7->type);
@@ -429,6 +431,20 @@ extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
 	                     ? sk_X509_value(signers, 0)
 	                     : NULL;
 	if (signer) {
+		/*
+		 * Fulcio/OriginSign keyless marker: the leaf certificate carries
+		 * the OIDC issuer as X.509 extension 1.3.6.1.4.1.57264.1.1.
+		 * Keyed certificates (e.g. DB.crt) have no such extension.
+		 */
+		ASN1_OBJECT *fulcio_oid =
+			OBJ_txt2obj("1.3.6.1.4.1.57264.1.1", 1);
+		if (fulcio_oid) {
+			if (out_keyless)
+				*out_keyless = (X509_get_ext_by_OBJ(
+				                    signer, fulcio_oid, -1) >= 0);
+			ASN1_OBJECT_free(fulcio_oid);
+		}
+
 		unsigned char *cert_der = NULL;
 		int cert_len = i2d_X509(signer, &cert_der);
 		if (cert_len > 0 && cert_der) {
@@ -487,10 +503,12 @@ out:
 
 EFI_STATUS
 osign_parse_pkcs7(char *data, UINTN datasize, PE_COFF_LOADER_IMAGE_CONTEXT ctx,
-                  CHAR8 **out_payload, CHAR8 **out_signature,
-                  CHAR8 **out_certificate)
+                  OSIGN_SIGNATURE *out_sigs, UINTN max_sigs, UINTN *out_count)
 {
 	EFI_STATUS efi_status;
+
+	if (out_count)
+		*out_count = 0;
 
 	UINTN start = ctx.SecDir->VirtualAddress;
 	UINTN size = ctx.SecDir->Size;
@@ -510,9 +528,15 @@ osign_parse_pkcs7(char *data, UINTN datasize, PE_COFF_LOADER_IMAGE_CONTEXT ctx,
 		goto out;
 	}
 
-	// Locate last PKCS#7 record in SecDir
-	ssize_t last_off = -1;
+	/*
+	 * Walk every WIN_CERTIFICATE entry (8-byte aligned) and collect all
+	 * OriginSign keyless (Fulcio) signatures into out_sigs. Keyed signatures
+	 * are skipped on purpose: they are verified by the shim's local DB path,
+	 * while keyless ones (possibly SM2) must be sent to the remote service.
+	 */
+	UINTN count = 0;
 	size_t offset = 0;
+
 	while (offset < size) {
 		const WIN_CERTIFICATE_EFI_PKCS *w =
 			(const WIN_CERTIFICATE_EFI_PKCS *)ImageAddress(
@@ -524,59 +548,49 @@ osign_parse_pkcs7(char *data, UINTN datasize, PE_COFF_LOADER_IMAGE_CONTEXT ctx,
 			break;
 		}
 
-		if (w->Hdr.wCertificateType == WIN_CERT_TYPE_PKCS_SIGNED_DATA)
-			last_off = (ssize_t)offset;
+		if (w->Hdr.wCertificateType == WIN_CERT_TYPE_PKCS_SIGNED_DATA) {
+			const unsigned char *p = w->CertData;
+			long der_len = (long)(wlen - sizeof(w->Hdr));
+			PKCS7 *p7 = d2i_PKCS7(NULL, &p, der_len);
+
+			if (p7 && PKCS7_type_is_signed(p7)) {
+				CHAR8 *payload_b64 = NULL;
+				CHAR8 *sig_b64 = NULL;
+				CHAR8 *cert_b64 = NULL;
+				BOOLEAN keyless = FALSE;
+
+				BOOLEAN ok = extract_verification_data(
+					p7, sha256, sha1, &payload_b64, &sig_b64,
+					&cert_b64, &keyless);
+
+				if (ok && keyless && out_sigs &&
+				    count < max_sigs) {
+					out_sigs[count].payload = payload_b64;
+					out_sigs[count].signature = sig_b64;
+					out_sigs[count].certificate = cert_b64;
+					payload_b64 = NULL;
+					sig_b64 = NULL;
+					cert_b64 = NULL;
+					count++;
+				}
+				if (payload_b64)
+					FreePool(payload_b64);
+				if (sig_b64)
+					FreePool(sig_b64);
+				if (cert_b64)
+					FreePool(cert_b64);
+			}
+			if (p7)
+				PKCS7_free(p7);
+		}
+
 		offset = ALIGN_VALUE(offset + wlen, 8);
 	}
-	if (last_off < 0) {
-		efi_status = EFI_NOT_FOUND;
-		goto out;
-	}
 
-	const WIN_CERTIFICATE_EFI_PKCS *sig =
-		(const WIN_CERTIFICATE_EFI_PKCS *)ImageAddress(
-			data, datasize, start + (size_t)last_off);
-	const unsigned char *p = sig->CertData;
-	long der_len = (long)(sig->Hdr.dwLength - sizeof(sig->Hdr));
+	if (out_count)
+		*out_count = count;
 
-	PKCS7 *p7 = d2i_PKCS7(NULL, &p, der_len);
-	if (!p7 || !PKCS7_type_is_signed(p7)) {
-		if (p7)
-			PKCS7_free(p7);
-		efi_status = EFI_COMPROMISED_DATA;
-		goto out;
-	}
-
-	/* Collect base64 outputs from extraction and free them after use */
-	CHAR8 *signed_attrs_b64 = NULL;
-	CHAR8 *sig_b64 = NULL;
-	CHAR8 *cert_b64 = NULL;
-
-	BOOLEAN ok = extract_verification_data(
-		p7, sha256, sha1, &signed_attrs_b64, &sig_b64, &cert_b64);
-
-	PKCS7_free(p7);
-
-	if (out_payload) {
-		*out_payload = signed_attrs_b64;
-		signed_attrs_b64 = NULL;
-	}
-	if (out_signature) {
-		*out_signature = sig_b64;
-		sig_b64 = NULL;
-	}
-	if (out_certificate) {
-		*out_certificate = cert_b64;
-		cert_b64 = NULL;
-	}
-	if (signed_attrs_b64)
-		FreePool(signed_attrs_b64);
-	if (sig_b64)
-		FreePool(sig_b64);
-	if (cert_b64)
-		FreePool(cert_b64);
-
-	efi_status = ok ? EFI_SUCCESS : EFI_SECURITY_VIOLATION;
+	efi_status = count > 0 ? EFI_SUCCESS : EFI_NOT_FOUND;
 
 out:
 	return efi_status;
@@ -683,31 +697,24 @@ osign_verify(EFI_HANDLE image_handle, CHAR16 *target_path)
 		return false;
 	}
 
-	CHAR8 *payload = NULL;
-	CHAR8 *signature = NULL;
-	CHAR8 *certificate = NULL;
-	efi_status = osign_parse_pkcs7((char *)data, datasize, ctx, &payload,
-	                               &signature, &certificate);
-	if (EFI_ERROR(efi_status)) {
+	OSIGN_SIGNATURE sigs[OSIGN_MAX_SIGNATURES];
+	UINTN sig_count = 0;
+	ZeroMem(sigs, sizeof(sigs));
+	efi_status = osign_parse_pkcs7((char *)data, datasize, ctx, sigs,
+	                               OSIGN_MAX_SIGNATURES, &sig_count);
+	if (EFI_ERROR(efi_status) || sig_count == 0) {
 		if (data)
 			FreePool(data);
 		return false;
 	}
-	efi_status = osign_http_request(image_handle, payload, signature,
-	                                certificate);
+	efi_status = osign_http_request(image_handle, sigs, sig_count);
 	if (EFI_ERROR(efi_status)) {
-		if (payload)
-			FreePool(payload);
-		if (signature)
-			FreePool(signature);
-		if (certificate)
-			FreePool(certificate);
 		if (data)
 			FreePool(data);
 		return false;
 	}
 
-	/* osign_http_request frees payload/signature/certificate on success */
+	/* osign_http_request frees the signature blobs on success */
 	if (data)
 		FreePool(data);
 
@@ -723,11 +730,11 @@ osign_verify(EFI_HANDLE image_handle, CHAR16 *target_path)
 }
 
 EFI_STATUS
-osign_http_request(EFI_HANDLE image_handle, CHAR8 *payload, CHAR8 *signature,
-                   CHAR8 *certificate)
+osign_http_request(EFI_HANDLE image_handle, OSIGN_SIGNATURE *sigs, UINTN count)
 {
 	CHAR8 *uri = NULL;
-	CHAR8 *uri_literal = (CHAR8 *)"http://10.0.2.2:19090/verify";
+	CHAR8 *uri_literal =
+		(CHAR8 *)"http://10.0.2.2:28082/v1/verify/authenticode";
 	UINTN uri_len = AsciiStrLen((const char *)uri_literal);
 	uri = AllocatePool(uri_len + 1);
 	CopyMem(uri, uri_literal, uri_len);
@@ -736,51 +743,54 @@ osign_http_request(EFI_HANDLE image_handle, CHAR8 *payload, CHAR8 *signature,
 	/* GLOBAL VARIABLE: http_request_method */
 	http_request_method = HttpMethodPost;
 
-	// HTTP request body contains a base64-encoded JSON ASCII payload
-	UINTN cert_len =
-		certificate ? AsciiStrLen((const char *)certificate) : 0;
-	UINTN payload_len = payload ? AsciiStrLen((const char *)payload) : 0;
-	UINTN sig_len = signature ? AsciiStrLen((const char *)signature) : 0;
-	UINTN json_len = cert_len + payload_len + sig_len + 50000;
+	/* HTTP body: {"signatures":[{"payload":..,"signature":..,"certificate":..},..]} */
+	UINTN json_len = 50000;
+	for (UINTN i = 0; i < count; i++) {
+		if (sigs[i].payload)
+			json_len += AsciiStrLen((const char *)sigs[i].payload);
+		if (sigs[i].signature)
+			json_len += AsciiStrLen((const char *)sigs[i].signature);
+		if (sigs[i].certificate)
+			json_len += AsciiStrLen((const char *)sigs[i].certificate);
+	}
 
 	/* GLOBAL VARIABLE: tx_body_json */
 	tx_body_json = AllocatePool(json_len + 1);
 	if (!tx_body_json) {
+		for (UINTN i = 0; i < count; i++) {
+			if (sigs[i].payload)
+				FreePool(sigs[i].payload);
+			if (sigs[i].signature)
+				FreePool(sigs[i].signature);
+			if (sigs[i].certificate)
+				FreePool(sigs[i].certificate);
+		}
+		if (uri)
+			FreePool(uri);
 		return EFI_HTTP_ERROR;
 	}
 
-	// console_print(L"certificate: %a\n",certificate);
-	// console_print(L"payload: %a\n",payload);
-	// console_print(L"signature: %a\n",signature);
-
-	/* Build JSON into tx_body_json buffer (use AsciiSPrint to write into buffer) */
-	AsciiSPrint(
-		tx_body_json, json_len + 1,
-		(CHAR8 *)"{\"certificate\":\"%a\",\"payload\":\"%a\",\"signature\":\"%a\"}",
-		certificate ? certificate : (CHAR8 *)"",
-		payload ? payload : (CHAR8 *)"",
-		signature ? signature : (CHAR8 *)"");
+	UINTN off = 0;
+	AsciiSPrint(tx_body_json, json_len + 1, (CHAR8 *)"{\"signatures\":[");
+	off = AsciiStrLen((const char *)tx_body_json);
+	for (UINTN i = 0; i < count; i++) {
+		AsciiSPrint(
+			tx_body_json + off, json_len + 1 - off,
+			(CHAR8 *)"%s{\"payload\":\"%a\",\"signature\":\"%a\",\"certificate\":\"%a\"}",
+			i ? (CHAR8 *)"," : (CHAR8 *)"",
+			sigs[i].payload ? sigs[i].payload : (CHAR8 *)"",
+			sigs[i].signature ? sigs[i].signature : (CHAR8 *)"",
+			sigs[i].certificate ? sigs[i].certificate
+			                    : (CHAR8 *)"");
+		off = AsciiStrLen((const char *)tx_body_json);
+	}
+	AsciiSPrint(tx_body_json + off, json_len + 1 - off, (CHAR8 *)"]}");
 
 	EFI_STATUS efi_status;
 
 	efi_status = send_http_get_request(image_handle, uri);
 	if (EFI_ERROR(efi_status)) {
 		perror(L"failed to send http request\n");
-		if (tx_body_json) {
-			FreePool(tx_body_json);
-			tx_body_json = NULL;
-		}
-		if (payload)
-			FreePool(payload);
-		if (signature)
-			FreePool(signature);
-		if (certificate)
-			FreePool(certificate);
-		if (uri) {
-			FreePool(uri);
-			uri = NULL;
-		}
-		return efi_status;
 	}
 
 	/* tx_body_json ownership: free now */
@@ -789,13 +799,15 @@ osign_http_request(EFI_HANDLE image_handle, CHAR8 *payload, CHAR8 *signature,
 		tx_body_json = NULL;
 	}
 
-	/* free payload blobs */
-	if (payload)
-		FreePool(payload);
-	if (signature)
-		FreePool(signature);
-	if (certificate)
-		FreePool(certificate);
+	/* free the collected signature blobs */
+	for (UINTN i = 0; i < count; i++) {
+		if (sigs[i].payload)
+			FreePool(sigs[i].payload);
+		if (sigs[i].signature)
+			FreePool(sigs[i].signature);
+		if (sigs[i].certificate)
+			FreePool(sigs[i].certificate);
+	}
 
 	if (uri) {
 		FreePool(uri);

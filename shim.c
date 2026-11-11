@@ -702,21 +702,24 @@ verify_buffer_authenticode (char *data, int datasize,
 
 	/*
 	 * HTTP-first verification strategy:
-	 * 1. Try remote HTTP verification first (keyless signature service)
-	 * 2. If HTTP fails, fall back to local DB/Shim/Vendor cert verification
-	 * 3. DB verification below acts as safety net
+	 * 1. Only OriginSign keyless (Fulcio) signatures are sent to the remote
+	 *    verification service; keyed signatures are verified locally.
+	 * 2. If no keyless signature exists (or HTTP fails), fall back to local
+	 *    DB/Shim/Vendor cert verification.
+	 * 3. DB verification below acts as safety net.
 	 */
-	CHAR8 *payload = NULL;
-	CHAR8 *signature = NULL;
-	CHAR8 *certificate = NULL;
+	OSIGN_SIGNATURE sigs[OSIGN_MAX_SIGNATURES];
+	UINTN sig_count = 0;
 	EFI_STATUS http_status;
 
-	/* Try HTTP remote verification first */
-	http_status = osign_parse_pkcs7(data, size, *context,
-		&payload, &signature, &certificate);
-	if (!EFI_ERROR(http_status)) {
-		http_status = osign_http_request(global_image_handle,
-				payload, signature, certificate);
+	ZeroMem(sigs, sizeof(sigs));
+
+	/* Try HTTP remote verification only for OriginSign keyless signatures */
+	http_status = osign_parse_pkcs7(data, size, *context, sigs,
+		OSIGN_MAX_SIGNATURES, &sig_count);
+	if (!EFI_ERROR(http_status) && sig_count > 0) {
+		http_status = osign_http_request(global_image_handle, sigs,
+				sig_count);
 		if (!EFI_ERROR(http_status)) {
 			/* HTTP verification succeeded — binary is trusted */
 			drain_openssl_errors();
@@ -724,6 +727,10 @@ verify_buffer_authenticode (char *data, int datasize,
 		}
 		/* HTTP failed — continue to local DB verification */
 		dprint(L"HTTP verification failed: %r, falling back to DB\n", http_status);
+	} else {
+		/* No OriginSign keyless signature (or parse failed): the local
+		 * DB/Shim/Vendor verification below decides. */
+		dprint(L"No OriginSign keyless signature, local DB verification\n");
 	}
 
 	/*

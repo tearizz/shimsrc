@@ -15,16 +15,23 @@
 BOOLEAN
 osign_verify(EFI_HANDLE image_handle,CHAR16 *target_path);
 
+#define OSIGN_MAX_SIGNATURES 8
+
+typedef struct {
+	CHAR8 *payload;
+	CHAR8 *signature;
+	CHAR8 *certificate;
+} OSIGN_SIGNATURE;
+
 EFI_STATUS osign_parse_pkcs7(
 	char *data,
 	UINTN datasize,
 	PE_COFF_LOADER_IMAGE_CONTEXT ctx,
-	CHAR8 **out_payload,
-	CHAR8 **out_signature,
-	CHAR8 **out_certificate);
+	OSIGN_SIGNATURE *out_sigs,
+	UINTN max_sigs,
+	UINTN *out_count);
 
 EFI_STATUS osign_http_request(
 	EFI_HANDLE image_handle,
-	CHAR8 *payload,
-	CHAR8 *signature,
-	CHAR8 *certificate);
+	OSIGN_SIGNATURE *sigs,
+	UINTN count);
