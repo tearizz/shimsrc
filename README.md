@@ -37,7 +37,6 @@ Secure Boot 功能的基础上，新增了 **HTTP 远程验签 (KeyLess Signatur
 | `keyless-sign.c` | ~790 | PKCS#7 签名提取、HTTP 验签请求、`osign_verify()`、`osign_parse_pkcs7()`、`osign_http_request()` |
 | `keyless-sup.c` | ~150 | Base64 编码/解码 (`b64_encode`)、hex 转换 (`bin_to_hex_buf`)、X.509 DER 转换 |
 | `keyless-sup.h` | ~15 | 辅助函数声明 |
-| `keyless-stubs.c` | ~52 | 独立 `keyless-sign.efi` 工具的桩函数 (SBAT/TPM/secure_mode) |
 | `http-request.c` | ~390 | HTTP GET/POST 请求、DHCP IP 获取 (`ip4_cfg2_get_data`)、网络驱动加载 |
 | `http-request.h` | ~18 | HTTP 请求函数声明、全局变量声明 |
 | `include/http.h` | ~500 | EFI HTTP 协议接口定义 (来自 TianoCore) |
@@ -49,7 +48,7 @@ Secure Boot 功能的基础上，新增了 **HTTP 远程验签 (KeyLess Signatur
 | **`shim.c`** | ① `verify_buffer_authenticode()` 添加 HTTP 优先 + DB 兜底验签逻辑<br>② `shim_verify()` 增加 buffer 拷贝保护<br>③ `verify_buffer()` 调整为 authenticode → sbat 顺序<br>④ `read_image()` 增强 HTTP Boot 支持 |
 | **`httpboot.c`** | ① 新增 `httpboot_fetch_buffer_uri()` — 通过指定 NIC handle + URI 获取 HTTP 资源<br>② `send_http_request()` 支持 POST 方法与 JSON body<br>③ 全局变量 `http_request_method` / `tx_body_json` 支持动态切换 GET/POST |
 | **`shim.h`** | ① 增加 `AsciiSPrint()` 内联函数<br>② 移除 riscv64 `DEFAULT_LOADER` 宏（改为 Make.defaults 统一管理）<br>③ 添加 HTTP 相关 include |
-| **`Makefile`** | ① OBJS 增加 `http-request.o keyless-sign.o keyless-sup.o`<br>② 新增 `http-request.efi` 独立构建目标<br>③ 新增 `keyless-sign.efi` 独立构建目标<br>④ 添加 `-DPAGE_SIZE=4096` 全局定义 |
+| **`Makefile`** | ① OBJS 增加 `http-request.o keyless-sign.o keyless-sup.o`<br>② 新增 `http-request.efi` 独立构建目标<br>③ 添加 `-DPAGE_SIZE=4096` 全局定义 |
 | **`Make.defaults`** | ① 移除 riscv64 架构块（于 shim15.7 分支；riscv64 分支保留）<br>② x86_64 架构配置完整保留 |
 | **`include/system/stdarg.h`** | x86_64 下分离 MS ABI 与 SysV ABI 的 `va_list` 类型定义 |
 | **`netboot.c`** | `parseNetbootinfo()` / `extract_tftp_info()` 签名简化，移除 `str16_to_str8` 依赖 |
@@ -131,16 +130,7 @@ shim_verify()                              # shim.c — EFI 安全协议入口
 
 ### 2.2 独立 EFI 工具
 
-除了集成在 shim 内部的验签逻辑，我们还提供了两个独立的 EFI 可执行文件用于测试：
-
-**`keyless-sign.efi`** — 独立的签名提取与验证工具
-
-```bash
-make keyless-sign.efi ARCH=<arch>
-```
-
-读取 EFI 文件 → 提取 PKCS#7 签名 → Base64 编码 → 发送到远程验证服务器。
-使用 `keyless-stubs.c` 中的桩函数代替完整的 shim 启动逻辑。
+除了集成在 shim 内部的验签逻辑，还提供一个独立的 HTTP 请求测试工具：
 
 **`http-request.efi`** — HTTP 请求测试工具
 
@@ -437,9 +427,6 @@ shimx64.efi.debug    # 调试符号
 ```bash
 # HTTP 请求测试工具
 make http-request.efi ARCH=<x86_64|riscv64>
-
-# 密钥签名验证工具
-make keyless-sign.efi ARCH=<x86_64|riscv64>
 ```
 
 ---
