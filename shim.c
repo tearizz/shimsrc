@@ -679,22 +679,30 @@ static EFI_STATUS
 verify_keyless_authenticode (char *data, size_t size,
 			     PE_COFF_LOADER_IMAGE_CONTEXT *context)
 {
-	OSIGN_SIGNATURE sigs[OSIGN_MAX_SIGNATURES];
+	OSIGN_SIGNATURE *sigs = NULL;
 	UINTN sig_count = 0;
 	EFI_STATUS efi_status;
 
-	ZeroMem(sigs, sizeof(sigs));
-
-	efi_status = osign_parse_pkcs7(data, size, *context, sigs,
-				       OSIGN_MAX_SIGNATURES, &sig_count);
-	if (EFI_ERROR(efi_status) || sig_count == 0)
+	efi_status = osign_parse_pkcs7(data, size, *context, &sigs, &sig_count);
+	if (EFI_ERROR(efi_status)) {
+		if (sigs)
+			FreePool(sigs);
+		dprint(L"Keyless signature parse failed: %r\n", efi_status);
+		return efi_status;
+	}
+	if (sig_count == 0) {
+		if (sigs)
+			FreePool(sigs);
 		return EFI_NOT_FOUND;
+	}
 
 	/*
 	 * osign_http_request() frees all signature blobs, whether the
-	 * request succeeds or fails.
+	 * request succeeds or fails.  The array itself is owned by us.
 	 */
-	return osign_http_request(global_image_handle, sigs, sig_count);
+	efi_status = osign_http_request(global_image_handle, sigs, sig_count);
+	FreePool(sigs);
+	return efi_status;
 }
 
 /*
