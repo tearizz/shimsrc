@@ -399,12 +399,3 @@ http-request.so: $(HR_OBJS) $(LIBS)
 	$(LD)	-o	$@	$(LDFLAGS)	$^	$(EFI_LIBS)	lib/lib.a
 	
 http-request.efi : http-request.so post-process-pe
-
-# Make keyless-sign.efi
-KEYLESSSIGN_OBJS = keyless-sign.o pe.o keyless-stubs.o keyless-sup.o http-request.o httpboot.o globals.o errlog.o sbat_data.o
-
-keyless-sign.so: $(KEYLESSSIGN_OBJS) $(LIBS)
-	$(LD)	-o	$@	$(LDFLAGS)	$^	$(EFI_LIBS)	lib/lib.a
-	
-keyless-sign.efi : keyless-sign.so post-process-pe
-

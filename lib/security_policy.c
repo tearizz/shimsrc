@@ -191,6 +191,15 @@ security_policy_authentication (
  * handing off to the ELF function.
  */
 
+/*
+ * The x86-64 assembly below only exists because the Microsoft x64 UEFI ABI
+ * (EFIAPI = ms_abi with GCC) differs from the SysV ELF ABI used by the
+ * compiler.  On RISC-V, AArch64 and IA32 (with GCC) EFIAPI is empty and the
+ * UEFI calling convention is the platform's normal C calling convention, so
+ * the C functions can be installed directly.
+ */
+#if defined(__x86_64__)
+
 asm (
 ".type security2_policy_authentication,@function\n"
 "thunk_security2_policy_authentication:\n\t"
@@ -248,6 +257,20 @@ asm (
 	"ret\n"
 );
 
+#define SECURITY2_POLICY_ENTRY \
+	((EFI_SECURITY2_FILE_AUTHENTICATION) thunk_security2_policy_authentication)
+#define SECURITY_POLICY_ENTRY \
+	((EFI_SECURITY_FILE_AUTHENTICATION_STATE) thunk_security_policy_authentication)
+
+#else /* !__x86_64__ */
+
+#define SECURITY2_POLICY_ENTRY \
+	((EFI_SECURITY2_FILE_AUTHENTICATION) security2_policy_authentication)
+#define SECURITY_POLICY_ENTRY \
+	((EFI_SECURITY_FILE_AUTHENTICATION_STATE) security_policy_authentication)
+
+#endif /* __x86_64__ */
+
 EFI_STATUS
 security_policy_install(SecurityHook hook)
 {
@@ -273,13 +296,11 @@ security_policy_install(SecurityHook hook)
 
 	if (security2_protocol) {
 		es2fa = security2_protocol->FileAuthentication;
-		security2_protocol->FileAuthentication =
-			(EFI_SECURITY2_FILE_AUTHENTICATION) thunk_security2_policy_authentication;
+		security2_protocol->FileAuthentication = SECURITY2_POLICY_ENTRY;
 	}
 
 	esfas = security_protocol->FileAuthenticationState;
-	security_protocol->FileAuthenticationState =
-		(EFI_SECURITY_FILE_AUTHENTICATION_STATE) thunk_security_policy_authentication;
+	security_protocol->FileAuthenticationState = SECURITY_POLICY_ENTRY;
 
 	if (hook)
 		extra_check = hook;

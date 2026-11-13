@@ -560,34 +560,14 @@ verify_one_signature(WIN_CERTIFICATE_EFI_PKCS *sig,
 /*
  * Check that the signature is valid and matches the binary
  */
-EFI_STATUS
-verify_buffer_authenticode (char *data, int datasize,
-			    PE_COFF_LOADER_IMAGE_CONTEXT *context,
-			    UINT8 *sha256hash, UINT8 *sha1hash)
+static EFI_STATUS
+verify_local_authenticode (char *data, size_t size,
+			   PE_COFF_LOADER_IMAGE_CONTEXT *context,
+			   UINT8 *sha256hash, UINT8 *sha1hash)
 {
 	EFI_STATUS ret_efi_status;
-	size_t size = datasize;
 	size_t offset = 0;
 	unsigned int i = 0;
-
-	if (datasize < 0)
-		return EFI_INVALID_PARAMETER;
-
-	/*
-	 * Clear OpenSSL's error log, because we get some DSO unimplemented
-	 * errors during its intialization, and we don't want those to look
-	 * like they're the reason for validation failures.
-	 */
-	drain_openssl_errors();
-
-	ret_efi_status = generate_hash(data, datasize, context, sha256hash, sha1hash);
-	if (EFI_ERROR(ret_efi_status)) {
-		dprint(L"generate_hash: %r\n", ret_efi_status);
-		PrintErrors();
-		ClearErrors();
-		crypterr(ret_efi_status);
-		return ret_efi_status;
-	}
 
 	/*
 	 * Ensure that the binary isn't forbidden by hash
@@ -595,8 +575,6 @@ verify_buffer_authenticode (char *data, int datasize,
 	drain_openssl_errors();
 	ret_efi_status = check_denylist(NULL, sha256hash, sha1hash);
 	if (EFI_ERROR(ret_efi_status)) {
-//		perror(L"Binary is forbidden\n");
-//		dprint(L"Binary is forbidden: %r\n", ret_efi_status);
 		PrintErrors();
 		ClearErrors();
 		crypterr(ret_efi_status);
@@ -647,7 +625,7 @@ verify_buffer_authenticode (char *data, int datasize,
 			break;
 
 		if ((uint64_t)(uintptr_t)&sig[1]
-		    > (uint64_t)(uintptr_t)data + datasize) {
+		    > (uint64_t)(uintptr_t)data + size) {
 			perror(L"Certificate size is too large for secruity database");
 			return EFI_INVALID_PARAMETER;
 		}
@@ -694,52 +672,126 @@ verify_buffer_authenticode (char *data, int datasize,
 		offset = ALIGN_VALUE(offset + sz, 8);
 	} while (offset < context->SecDir->Size);
 
-	// if (ret_efi_status != EFI_SUCCESS) {
-	// 	dprint(L"Binary is not authorized\n");
-	// 	PrintErrors();
-	// 	ClearErrors();
-	// }
+	return ret_efi_status;
+}
 
-	/*
-	 * HTTP-first verification strategy:
-	 * 1. Try remote HTTP verification first (keyless signature service)
-	 * 2. If HTTP fails, fall back to local DB/Shim/Vendor cert verification
-	 * 3. DB verification below acts as safety net
-	 */
-	CHAR8 *payload = NULL;
-	CHAR8 *signature = NULL;
-	CHAR8 *certificate = NULL;
-	EFI_STATUS http_status;
+static EFI_STATUS
+verify_keyless_authenticode (char *data, size_t size,
+			     PE_COFF_LOADER_IMAGE_CONTEXT *context)
+{
+	OSIGN_SIGNATURE *sigs = NULL;
+	UINTN sig_count = 0;
+	EFI_STATUS efi_status;
 
-	/* Try HTTP remote verification first */
-	http_status = osign_parse_pkcs7(data, size, *context,
-		&payload, &signature, &certificate);
-	if (!EFI_ERROR(http_status)) {
-		http_status = osign_http_request(global_image_handle,
-				payload, signature, certificate);
-		if (!EFI_ERROR(http_status)) {
-			/* HTTP verification succeeded — binary is trusted */
-			drain_openssl_errors();
-			return http_status;
-		}
-		/* HTTP failed — continue to local DB verification */
-		dprint(L"HTTP verification failed: %r, falling back to DB\n", http_status);
+	efi_status = osign_parse_pkcs7(data, size, *context, &sigs, &sig_count);
+	if (EFI_ERROR(efi_status)) {
+		if (sigs)
+			FreePool(sigs);
+		dprint(L"Keyless signature parse failed: %r\n", efi_status);
+		return efi_status;
+	}
+	if (sig_count == 0) {
+		if (sigs)
+			FreePool(sigs);
+		return EFI_NOT_FOUND;
 	}
 
 	/*
-	 * Local DB verification as fallback:
-	 * If HTTP was not tried or failed, check against DB/Shim/Vendor cert.
-	 * ret_efi_status from the signature loop above already reflects
-	 * the local verification result.
+	 * osign_http_request() frees all signature blobs, whether the
+	 * request succeeds or fails.  The array itself is owned by us.
 	 */
-	if (ret_efi_status == EFI_SUCCESS) {
+	efi_status = osign_http_request(global_image_handle, sigs, sig_count);
+	FreePool(sigs);
+	return efi_status;
+}
+
+/*
+ * Check that the signature is valid and matches the binary.
+ *
+ * Ordering is selectable at build time:
+ *
+ *   KEYLESS_FIRST undefined/0:
+ *       local DBX/DB/keyed verification first; if that succeeds, stop.
+ *       Keyless is only attempted after the local path fails.
+ *
+ *   KEYLESS_FIRST=1:
+ *       keyless signatures are sent to OriginSign first.  On success the
+ *       image is accepted and the local (DB/Dbx/keyed) path is skipped.
+ *       On failure/unavailability the local path is used as fallback.
+ *
+ * The firmware Security2 wrapper in security_policy.c is intentionally
+ * left unchanged: for LoadImage() the firmware DB check still runs before
+ * shim_verify() is called.
+ */
+EFI_STATUS
+verify_buffer_authenticode (char *data, int datasize,
+			    PE_COFF_LOADER_IMAGE_CONTEXT *context,
+			    UINT8 *sha256hash, UINT8 *sha1hash)
+{
+	EFI_STATUS ret_efi_status;
+	size_t size = datasize;
+
+	if (datasize < 0)
+		return EFI_INVALID_PARAMETER;
+
+	/*
+	 * Clear OpenSSL's error log, because we get some DSO unimplemented
+	 * errors during its intialization, and we don't want those to look
+	 * like they're the reason for validation failures.
+	 */
+	drain_openssl_errors();
+
+	ret_efi_status = generate_hash(data, datasize, context, sha256hash, sha1hash);
+	if (EFI_ERROR(ret_efi_status)) {
+		dprint(L"generate_hash: %r\n", ret_efi_status);
+		PrintErrors();
+		ClearErrors();
+		crypterr(ret_efi_status);
+		return ret_efi_status;
+	}
+
+#if defined(KEYLESS_FIRST)
+	/*
+	 * Keyless-first: no local DBX/DB/keyed work is done before the remote
+	 * service gets a chance to authorize the image.  If keyless is not
+	 * applicable or fails, fall through to the local path.
+	 */
+	ret_efi_status = verify_keyless_authenticode(data, size, context);
+	if (!EFI_ERROR(ret_efi_status)) {
+		update_verification_method(VERIFIED_BY_KEYLESS);
 		drain_openssl_errors();
 		return ret_efi_status;
 	}
 
-	/* Both HTTP and local verification failed */
+	ret_efi_status = verify_local_authenticode(data, size, context,
+						   sha256hash, sha1hash);
 	drain_openssl_errors();
 	return ret_efi_status;
+#else
+	EFI_STATUS local_status;
+
+	/*
+	 * Local-first: a successful keyed/DB verification is final.  Do not
+	 * scan for keyless signatures or contact the remote service after a
+	 * local success.
+	 */
+	local_status = verify_local_authenticode(data, size, context,
+						 sha256hash, sha1hash);
+	if (!EFI_ERROR(local_status)) {
+		drain_openssl_errors();
+		return local_status;
+	}
+
+	ret_efi_status = verify_keyless_authenticode(data, size, context);
+	if (!EFI_ERROR(ret_efi_status)) {
+		update_verification_method(VERIFIED_BY_KEYLESS);
+		drain_openssl_errors();
+		return ret_efi_status;
+	}
+
+	drain_openssl_errors();
+	return local_status;
+#endif
 }
 
 /*
@@ -1061,33 +1113,18 @@ EFI_STATUS shim_verify (void *buffer, UINT32 size)
 		goto done;
 	}
 
-	/* 
-	 * CRITICAL: Make a copy of buffer before verification to prevent
-	 * HTTP operations from corrupting the caller's memory (e.g., kernel code)
+	/*
+	 * Verify the caller's buffer directly.
+	 *
+	 * An earlier version copied the whole image into the pool
+	 * (AllocatePool(size)) before verification.  For a ~40MB kernel that is a
+	 * ~40MB EfiLoaderData allocation, which fragmented/exhausted the firmware
+	 * pool and made GRUB's subsequent initrd allocation fail with
+	 * "linux.c:433: out of memory".  The verification path only reads the
+	 * image (digest + SecDir PKCS#7), so no copy is required.
 	 */
-	void *buffer_copy = AllocatePool(size);
-	if (!buffer_copy) {
-		console_print(L"Failed to allocate buffer copy for verification\n");
-		efi_status = EFI_OUT_OF_RESOURCES;
-		goto done;
-	}
-	CopyMem(buffer_copy, buffer, size);
-
-	// Parse a new context for buffer_copy
-	PE_COFF_LOADER_IMAGE_CONTEXT copy_context;
-	EFI_STATUS copy_status = read_header(buffer_copy, size, &copy_context);
-	if (EFI_ERROR(copy_status)) {
-		FreePool(buffer_copy);
-		efi_status = copy_status;	
-		goto done;
-	}
-	
-	/* Use the copy for verification, not the original */
-	efi_status = verify_buffer(buffer_copy, size,
-			   &copy_context, sha256hash, sha1hash);
-	
-	/* Free the copy after verification */
-	FreePool(buffer_copy);	
+	efi_status = verify_buffer(buffer, size,
+			   &context, sha256hash, sha1hash);
 
 done:
 	in_protocol = 0;

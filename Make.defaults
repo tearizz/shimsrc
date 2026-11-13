@@ -155,6 +155,10 @@ ifneq ($(origin OVERRIDE_SECURITY_POLICY), undefined)
 	DEFINES	+= -DOVERRIDE_SECURITY_POLICY
 endif
 
+ifeq ($(KEYLESS_FIRST),1)
+	DEFINES	+= -DKEYLESS_FIRST
+endif
+
 ifneq ($(origin REQUIRE_TPM), undefined)
 	DEFINES  += -DREQUIRE_TPM
 endif

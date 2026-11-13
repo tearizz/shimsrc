@@ -12,7 +12,8 @@ extern EFI_SYSTEM_TABLE *get_active_systab(void);
 typedef enum {
 	VERIFIED_BY_NOTHING,
 	VERIFIED_BY_CERT,
-	VERIFIED_BY_HASH
+	VERIFIED_BY_HASH,
+	VERIFIED_BY_KEYLESS
 } verification_method_t;
 
 extern verification_method_t verification_method;

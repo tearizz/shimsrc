@@ -245,6 +245,30 @@ load_network_drivers(EFI_HANDLE image_handle)
 	return EFI_SUCCESS;
 }
 
+
+/*
+ * Check whether the HTTP service binding is already present.  On the RISC-V
+ * image the startup.nsh shell has already loaded Hash2DxeCrypto/TcpDxe/
+ * HttpDxe before shim runs, and OVMF provides them on x86.  Reloading them
+ * from inside the image-verification callback is both unnecessary and
+ * dangerous: LoadImage() is re-entered while the caller's image is still
+ * being verified, which can disturb firmware/GRUB state.
+ */
+static BOOLEAN
+http_binding_present(void)
+{
+	EFI_HANDLE *handles = NULL;
+	UINTN count = 0;
+	EFI_STATUS efi_status;
+
+	efi_status = BS->LocateHandleBuffer(ByProtocol, &EFI_HTTP_BINDING_GUID,
+	                                    NULL, &count, &handles);
+	if (handles)
+		BS->FreePool(handles);
+
+	return !EFI_ERROR(efi_status) && count > 0;
+}
+
 EFI_STATUS
 send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 {
@@ -253,8 +277,10 @@ send_http_get_request(EFI_HANDLE image_handle, CHAR8 *uri)
 	UINTN count = 0;
 	EFI_HANDLE *http_binding_handles = NULL;
 
-	/* Ensure network drivers are loaded before searching for HTTP binding */
-	load_network_drivers(image_handle);
+	/* Ensure network drivers are loaded before searching for HTTP binding.
+	 * Do not reload them when startup.nsh/OVMF already provided the stack. */
+	if (!http_binding_present())
+		load_network_drivers(image_handle);
 
 	/* Retry for up to 30s: newly loaded drivers need time to bind */
 	{
