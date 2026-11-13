@@ -34,7 +34,7 @@ Secure Boot 功能的基础上，新增了 **HTTP 远程验签 (KeyLess Signatur
 
 | 文件 | 行数 | 功能 |
 |------|------|------|
-| `keyless-sign.c` | ~790 | PKCS#7 签名提取、HTTP 验签请求、`osign_verify()`、`osign_parse_pkcs7()`、`osign_http_request()` |
+| `keyless-sign.c` | ~1020 | PKCS#7 签名提取、两遍遍历动态签名数组、HTTP 批量验签、`osign_verify()` / `osign_parse_pkcs7()` / `osign_http_request()` |
 | `keyless-sup.c` | ~150 | Base64 编码/解码 (`b64_encode`)、hex 转换 (`bin_to_hex_buf`)、X.509 DER 转换 |
 | `keyless-sup.h` | ~15 | 辅助函数声明 |
 | `http-request.c` | ~390 | HTTP GET/POST 请求、DHCP IP 获取 (`ip4_cfg2_get_data`)、网络驱动加载 |
@@ -45,10 +45,10 @@ Secure Boot 功能的基础上，新增了 **HTTP 远程验签 (KeyLess Signatur
 
 | 文件 | 修改内容 |
 |------|----------|
-| **`shim.c`** | ① `verify_buffer_authenticode()` 添加 HTTP 优先 + DB 兜底验签逻辑<br>② `shim_verify()` 增加 buffer 拷贝保护<br>③ `verify_buffer()` 调整为 authenticode → sbat 顺序<br>④ `read_image()` 增强 HTTP Boot 支持 |
+| **`shim.c`** | ① 拆分 `verify_local_authenticode()` / `verify_keyless_authenticode()`，支持 `KEYLESS_FIRST` 顺序<br>② `shim_verify()` 直接验证调用者 buffer，移除 40MB 内核拷贝<br>③ `verify_buffer()` 调整为 authenticode → sbat 顺序<br>④ `read_image()` 增强 HTTP Boot 支持 |
 | **`httpboot.c`** | ① 新增 `httpboot_fetch_buffer_uri()` — 通过指定 NIC handle + URI 获取 HTTP 资源<br>② `send_http_request()` 支持 POST 方法与 JSON body<br>③ 全局变量 `http_request_method` / `tx_body_json` 支持动态切换 GET/POST |
 | **`shim.h`** | ① 增加 `AsciiSPrint()` 内联函数<br>② 移除 riscv64 `DEFAULT_LOADER` 宏（改为 Make.defaults 统一管理）<br>③ 添加 HTTP 相关 include |
-| **`Makefile`** | ① OBJS 增加 `http-request.o keyless-sign.o keyless-sup.o`<br>② 新增 `http-request.efi` 独立构建目标<br>③ 添加 `-DPAGE_SIZE=4096` 全局定义 |
+| **`Makefile`** | ① OBJS 增加 `http-request.o keyless-sign.o keyless-sup.o`<br>② 新增 `http-request.efi` 独立构建目标<br>③ 添加 `-DPAGE_SIZE=4096` 全局定义<br>④ `KEYLESS_FIRST` / `OVERRIDE_SECURITY_POLICY` 构建选项 |
 | **`Make.defaults`** | ① 移除 riscv64 架构块（于 shim15.7 分支；riscv64 分支保留）<br>② x86_64 架构配置完整保留 |
 | **`include/system/stdarg.h`** | x86_64 下分离 MS ABI 与 SysV ABI 的 `va_list` 类型定义 |
 | **`netboot.c`** | `parseNetbootinfo()` / `extract_tftp_info()` 签名简化，移除 `str16_to_str8` 依赖 |
@@ -64,69 +64,68 @@ Secure Boot 功能的基础上，新增了 **HTTP 远程验签 (KeyLess Signatur
 DB/MokList 证书验证外，还会将 PE 二进制文件的 PKCS#7 签名数据发送到远程服务器
 进行二次验证。
 
-**验签策略 (HTTP 优先，本地 DB 兜底)：**
+**验签策略：**
 
-```
-verify_buffer_authenticode()
-  │
-  ├─ ① 本地 DB/Shim/Vendor 证书签名循环验证
-  │     └─ 结果保存在 ret_efi_status
-  │
-  ├─ ② HTTP 远程验证 (优先路径)
-  │     ├─ osign_parse_pkcs7()    — 提取 payload/signature/certificate (Base64)
-  │     ├─ osign_http_request()   — POST 到远程 /verify 端点
-  │     ├─ 成功 → return EFI_SUCCESS (信任远程结果)
-  │     └─ 失败 → dprint("falling back to DB")
-  │
-  └─ ③ 本地 DB 验证 (兜底路径)
-        ├─ ret_efi_status == EFI_SUCCESS → 信任本地结果
-        └─ 否则 → 验证失败, 拒绝启动
+`KEYLESS_FIRST` 控制顺序，默认未定义（本地优先）：
+
+```text
+KEYLESS_FIRST=0 / 未定义:
+  DBX → DB allowlist → 本地 keyed
+  本地成功 → 直接接受（短路，不再扫描 Keyless）
+  本地失败 → Keyless 批量远程验证
+
+KEYLESS_FIRST=1:
+  Keyless 批量远程验证
+  成功 → 接受，跳过 DBX/DB/本地
+  失败/不可用 → DBX → DB allowlist → 本地 keyed
 ```
 
-**HTTP 请求格式：**
+> `security_policy.c` 的 Security2 wrapper 保持不变：Kernel `LoadImage()` 的固件
+> 路径仍然是“固件 DB → Shim Keyless”。GRUB / shim_lock 路径则直接调用
+> `shim_verify()`，按上面的 `KEYLESS_FIRST` 策略执行。
 
-```
-POST http://10.0.2.2:8080/verify
+**HTTP 请求格式（多签名批量）：**
+
+```text
+POST http://10.0.2.2:28082/v1/verify/authenticode
 Content-Type: application/json
 
 {
-  "certificate": "<Base64 DER-encoded X.509 certificate>",
-  "payload":     "<Base64 DER-encoded SignedAttributes (SpcIndirectDataContent)>",
-  "signature":   "<Base64 signature bytes>"
+  "signatures": [
+    {
+      "payload": "<Base64 DER SignedAttributes>",
+      "signature": "<Base64 signature bytes>",
+      "certificate": "<Base64 DER X.509 leaf certificate>"
+    }
+  ]
 }
 ```
 
 **关键函数调用链：**
 
-```
+```text
 shim_verify()                              # shim.c — EFI 安全协议入口
   └─ verify_buffer()                       # shim.c — 签名 + SBAT 验证
        └─ verify_buffer_authenticode()      # shim.c — 主验证逻辑
-            ├─ check_denylist()             # 检查 dbx 黑名单
-            ├─ check_allowlist()            # 检查 db/MokList 白名单
-            ├─ verify_one_signature() x N   # 逐签名验证
-            ├─ osign_parse_pkcs7()          # keyless-sign.c — PKCS#7 解析
-            │    ├─ generate_hash()         # 计算 SHA-256/SHA-1
-            │    ├─ d2i_PKCS7()            # OpenSSL ASN.1 解码 PKCS#7
-            │    ├─ extract_verification_data()
-            │    │    ├─ 验证 messageDigest
-            │    │    ├─ 验证 DigestInfo (文件哈希比对)
-            │    │    ├─ b64_encode(SignedAttributes)  → payload
-            │    │    ├─ b64_encode(signature)         → signature
-            │    │    └─ i2d_X509 + b64_encode         → certificate
-            │    └─ 返回 payload/signature/certificate
-            └─ osign_http_request()         # keyless-sign.c — HTTP 远程验签
-                 ├─ AsciiSPrint()           # 构建 JSON body
-                 └─ send_http_get_request() # http-request.c — HTTP 传输层
-                      ├─ load_network_drivers()
-                      ├─ BS->LocateHandleBuffer(EFI_HTTP_BINDING_GUID)
-                      ├─ DHCP 获取 IP (Ip4Config2PolicyDhcp)
-                      └─ httpboot_fetch_buffer_uri()
-                           └─ http_fetch()
-                                ├─ configure_http()
-                                ├─ send_http_request()  # POST with JSON
-                                └─ receive_http_response()
+            ├─ KEYLESS_FIRST=1 ?
+            │    ├─ verify_keyless_authenticode()
+            │    │    └─ osign_parse_pkcs7()  # 两遍遍历 + 动态数组
+            │    │         └─ osign_http_request()
+            │    └─ 失败 → verify_local_authenticode() 兜底
+            │
+            └─ 默认/KEYLESS_FIRST=0：
+                 ├─ verify_local_authenticode()
+                 │    ├─ check_denylist()
+                 │    ├─ check_allowlist()
+                 │    └─ verify_one_signature() × N
+                 └─ 本地失败 → verify_keyless_authenticode()
+                      └─ osign_parse_pkcs7() → osign_http_request()
 ```
+
+`osign_parse_pkcs7()` 先统计 Fulcio Keyless 签名数量，再按精确数量分配数组并提取
+payload/signature/certificate；`osign_http_request()` 将全部 Keyless 签名打包为
+`{"signatures":[...]}` 一次发送。`http_request.c` 在 HTTP binding 已存在时不会
+重复加载网络驱动。
 
 ### 2.2 独立 EFI 工具
 
@@ -326,8 +325,20 @@ make -j$(nproc) \
     CROSS_COMPILE=riscv64-linux-gnu- \
     COMPILER=gcc \
     ENABLE_SHIM_CERT=1 \
-    VENDOR_CERT_FILE=/tmp/DB.der
+    VENDOR_CERT_FILE=/tmp/DB.der \
+    OVERRIDE_SECURITY_POLICY=1 \
+    KEYLESS_FIRST=1
 ```
+
+构建选项说明：
+
+| 选项 | 作用 |
+|---|---|
+| `OVERRIDE_SECURITY_POLICY=1` | 让 Shim 接管固件 `EFI_SECURITY2_PROTOCOL.FileAuthentication`，Keyless Kernel 才能通过固件 `LoadImage()`；**Keyless 启动必须**。`lib/Makefile` 也会收到该宏。 |
+| `KEYLESS_FIRST=1` | Shim 内部 Keyless 优先；默认不设置时为本地优先，且本地 keyed 成功即短路。 |
+| `ENABLE_SHIM_CERT=1` | 生成并签名 MokManager / fallback。 |
+| `VENDOR_CERT_FILE` | Shim 构建时嵌入的 Vendor Cert（DER）。 |
+
 
 #### 4.3.4 修复 .reloc 段 Page RVA (riscv64 特有)
 
@@ -397,14 +408,22 @@ make clean
 # 编译 (ARCH 自动检测为 x86_64)
 make -j$(nproc) \
     ENABLE_SHIM_CERT=1 \
-    VENDOR_CERT_FILE=/path/to/your/cert.der
+    VENDOR_CERT_FILE=/path/to/your/cert.der \
+    OVERRIDE_SECURITY_POLICY=1 \
+    KEYLESS_FIRST=1
 
 # 或者显式指定架构
 make -j$(nproc) \
     ARCH=x86_64 \
     ENABLE_SHIM_CERT=1 \
-    VENDOR_CERT_FILE=/path/to/your/cert.der
+    VENDOR_CERT_FILE=/path/to/your/cert.der \
+    OVERRIDE_SECURITY_POLICY=1 \
+    KEYLESS_FIRST=1
 ```
+
+> x86_64 使用 MS ABI thunk 兼容 `EFIAPI`；RISC-V/AArch64 则直接安装 C 回调。
+> `KEYLESS_FIRST` 默认关闭，不需要 Keyless 优先时省略即可。
+
 
 #### 4.4.2 产物
 
@@ -718,15 +737,19 @@ gnu-efi 头文件宏: uefi_call_wrapper(BS->HandleProtocol, ...)
 
 HTTP 远程验签需要一个运行在宿主机的验证服务：
 
-- **地址**：`http://10.0.2.2:8080/verify`（QEMU 默认宿主地址）
+- **地址**：`http://10.0.2.2:28082/v1/verify/authenticode`（QEMU 默认宿主地址）
 - **方法**：POST
 - **Content-Type**：`application/json`
 - **请求体**：
   ```json
   {
-    "certificate": "<Base64 DER X.509>",
-    "payload": "<Base64 DER SignedAttributes>",
-    "signature": "<Base64 signature>"
+    "signatures": [
+      {
+        "payload": "<Base64 DER SignedAttributes>",
+        "signature": "<Base64 signature>",
+        "certificate": "<Base64 DER X.509>"
+      }
+    ]
   }
   ```
 
@@ -869,7 +892,7 @@ AsciiSPrint(CHAR8 *buf, UINTN buf_size, const CHAR8 *fmt, ...)
 
 ### 8.5 远程验签服务不可达
 
-- QEMU 环境：确保验证服务监听在 `10.0.2.2:8080`
+- QEMU 环境：确保验证服务监听在 `10.0.2.2:28082`
 - 真实硬件：修改 `keyless-sign.c` 中的 `uri_literal` 为实际服务地址
 - HTTP 不可达时，shim 会回退到本地 DB 验证，不会阻止启动
 - 查看调试输出：设置 `SHIM_VERBOSE` UEFI 变量观察 `dprint()` 输出
