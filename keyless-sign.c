@@ -147,6 +147,30 @@ show_oid(ASN1_OBJECT *asn1_str)
  * - Extract signature (base64)
  * - Extract certificate (base64)
  */
+/*
+ * A Fulcio/keyless leaf certificate carries the OIDC issuer extension
+ * 1.3.6.1.4.1.57264.1.1.  This check is intentionally cheap and is done
+ * before parsing the SpcIndirectDataContent / allocating base64 buffers, so
+ * keyed-only artifacts do not pay the keyless-extraction cost.
+ */
+static BOOLEAN
+cert_is_keyless(X509 *signer)
+{
+	ASN1_OBJECT *fulcio_oid;
+	BOOLEAN keyless = FALSE;
+
+	if (!signer)
+		return FALSE;
+
+	fulcio_oid = OBJ_txt2obj("1.3.6.1.4.1.57264.1.1", 1);
+	if (!fulcio_oid)
+		return FALSE;
+
+	keyless = (X509_get_ext_by_OBJ(signer, fulcio_oid, -1) >= 0);
+	ASN1_OBJECT_free(fulcio_oid);
+	return keyless;
+}
+
 static BOOLEAN
 extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
                           CHAR8 **out_signed_attrs_b64, CHAR8 **out_sig_b64,
@@ -165,6 +189,8 @@ extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
 	if (out_keyless)
 		*out_keyless = FALSE;
 
+	BOOLEAN result = FALSE;
+
 	if (p7 && p7->type) {
 		show_oid(p7->type);
 		show_oid(p7->d.sign->contents->type);
@@ -179,6 +205,24 @@ extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
 	if (!si)
 		return FALSE;
 
+	/*
+	 * Classify the signature before doing any digest/SIDC/base64 work.
+	 * Only keyless signatures are sent to the remote service; keyed
+	 * signatures are left to the local DB/Mok/Vendor path.
+	 */
+	STACK_OF(X509) *signers = PKCS7_get0_signers(p7, NULL, 0);
+	X509 *signer = (signers && sk_X509_num(signers) > 0)
+	                     ? sk_X509_value(signers, 0)
+	                     : NULL;
+	if (!signer)
+		goto out;
+
+	if (!cert_is_keyless(signer))
+		goto out;
+
+	if (out_keyless)
+		*out_keyless = TRUE;
+
 	// md_nid: message digest algorithm numeric identifier
 	int md_nid = OBJ_obj2nid(si->digest_alg->algorithm);
 	const char *md_name = OBJ_nid2sn(md_nid);
@@ -192,7 +236,7 @@ extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
 		astr = sd->contents->d.other->value.asn1_string;
 	if (!astr || !astr->data || astr->length <= 0) {
 		// console_print(L"[EXTRACT] Content of signedData miss \n");
-		return FALSE;
+		goto out;
 	}
 
 	// base contains DER encoding of the SpcIndirectDataContent
@@ -208,7 +252,7 @@ extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
 	if (r & 0x80 || tag != V_ASN1_SEQUENCE || len < 0 ||
 	    (p + len) > (base + blen)) {
 		// console_print(L"[EXTRACT] Invalid SpcIndirectDataContent SEQUENCE\n");
-		return FALSE;
+		goto out;
 	}
 
 	// SEQ content = SpcIndirectDataContent content bytes
@@ -226,7 +270,7 @@ extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
 		PKCS7_get_signed_attribute(si, NID_pkcs9_messageDigest);
 	if (!tmd || tmd->type != V_ASN1_OCTET_STRING) {
 		// console_print(L"[EXTRACT] messageDigest attr missing\n");
-		return FALSE;
+		goto out;
 	}
 
 	CHAR8 md_attr_hex[SHA256_DIGEST_SIZE * 2 + 1];
@@ -238,10 +282,8 @@ extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
 	// Compare SEQ content hash with messageDigest
 	BOOLEAN md_match = ascii_eq(md_attr_hex, seq_hash_hex);
 
-	if (!md_match) {
-		// console_print(L"[EXTRACT] Content verification failed\n");
-		return FALSE;
-	}
+	if (!md_match)
+		goto out;
 
 	// 解析SpcIndirectDataContent 中的DigestInfo， 取出内部的
 	// 文件哈希(DigestInfo.digest) 并与 generate_hash 的结果sha256/sha1比较
@@ -311,13 +353,12 @@ extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
 					                SHA1_DIGEST_SIZE) == 0);
 				} else {
 					// embed_len(digest len) unknown or file hash not computed
-					return false;
+					X509_SIG_free(di);
+					goto out;
 				}
 				X509_SIG_free(di);
-				if (!file_match) {
-					// file hash mismatch DigestInfo mismatch\n");
-					return false;
-				}
+				if (!file_match)
+					goto out;
 			}
 		}
 	}
@@ -426,25 +467,7 @@ extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
 	}
 
 	// Extract certificate (base64)
-	STACK_OF(X509) *signers = PKCS7_get0_signers(p7, NULL, 0);
-	X509 *signer = (signers && sk_X509_num(signers) > 0)
-	                     ? sk_X509_value(signers, 0)
-	                     : NULL;
 	if (signer) {
-		/*
-		 * Fulcio/OriginSign keyless marker: the leaf certificate carries
-		 * the OIDC issuer as X.509 extension 1.3.6.1.4.1.57264.1.1.
-		 * Keyed certificates (e.g. DB.crt) have no such extension.
-		 */
-		ASN1_OBJECT *fulcio_oid =
-			OBJ_txt2obj("1.3.6.1.4.1.57264.1.1", 1);
-		if (fulcio_oid) {
-			if (out_keyless)
-				*out_keyless = (X509_get_ext_by_OBJ(
-				                    signer, fulcio_oid, -1) >= 0);
-			ASN1_OBJECT_free(fulcio_oid);
-		}
-
 		unsigned char *cert_der = NULL;
 		int cert_len = i2d_X509(signer, &cert_der);
 		if (cert_len > 0 && cert_der) {
@@ -458,10 +481,13 @@ extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
 			OPENSSL_free(cert_der);
 		}
 	}
+	result = TRUE;
+
+out:
 	if (signers)
 		sk_X509_free(signers);
 
-	return TRUE;
+	return result;
 }
 
 static EFI_STATUS

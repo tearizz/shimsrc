@@ -38,6 +38,10 @@ endif
 LDFLAGS		= -nostdlib -znocombreloc
 
 
+ifneq ($(origin OVERRIDE_SECURITY_POLICY),undefined)
+DEFINES		+= -DOVERRIDE_SECURITY_POLICY
+endif
+
 CFLAGS		= $(FEATUREFLAGS) \
 		  $(OPTIMIZATIONS) \
 		  $(WARNFLAGS) \
