@@ -16,6 +16,7 @@
 #include "keyless-sup.h"
 #include "shim.h"
 
+#include <limits.h>
 #include <openssl/asn1.h>
 #include <openssl/bio.h>
 #include <openssl/objects.h>
@@ -29,18 +30,6 @@
 #include <openssl/pkcs7.h>
 #include <openssl/sha.h>
 #include <openssl/x509.h>
-
-static int
-ascii_eq(const CHAR8 *a, const CHAR8 *b)
-{
-	while (*a && *b) {
-		if (*a != *b)
-			return 0;
-		a++;
-		b++;
-	}
-	return *a == 0 && *b == 0;
-}
 
 static EFI_STATUS
 read_file_ondisk(EFI_HANDLE device, CHAR16 *path, void **buf, UINTN *sz)
@@ -87,6 +76,10 @@ read_file_ondisk(EFI_HANDLE device, CHAR16 *path, void **buf, UINTN *sz)
 	if (EFI_ERROR(efi_status))
 		goto done;
 
+	if (info->FileSize > INT_MAX) {
+		efi_status = EFI_BAD_BUFFER_SIZE;
+		goto done;
+	}
 	*sz = info->FileSize;
 	*buf = AllocatePool(*sz);
 	if (!*buf) {
@@ -111,47 +104,6 @@ done:
 	return efi_status;
 }
 
-static UINTN
-hash_to_hex(int md_nid, const unsigned char *buf, size_t len, CHAR8 outhex[],
-            size_t outhexsz)
-{
-	UINT8 tmp[SHA256_DIGEST_SIZE];
-	UINTN tmplen = 0;
-
-	if (md_nid == NID_sha256) {
-		SHA256(buf, len, tmp);
-		tmplen = SHA256_DIGEST_SIZE;
-	} else if (md_nid == NID_sha1) {
-		SHA1(buf, len, tmp);
-		tmplen = SHA1_DIGEST_SIZE;
-	} else {
-		return 0;
-	}
-	bin_to_hex_buf(tmp, tmplen, outhex, outhexsz, FALSE);
-	return tmplen;
-}
-
-static void
-show_oid(ASN1_OBJECT *asn1_str)
-{
-	const ASN1_OBJECT *obj = asn1_str;
-	int nid = OBJ_obj2nid(obj);
-	const char *sn = (nid != NID_undef) ? OBJ_nid2sn(nid) : NULL;
-	char oid_txt[128] = { 0 };
-
-	OBJ_obj2txt(oid_txt, sizeof(oid_txt), obj, 1);
-
-	console_print(L"ContentType: NID=%d  name=%a  oid=%a\n", nid,
-	              sn ? sn : "NID_undef", oid_txt);
-}
-
-/*
- * Extract data for external verification:
- * - Verify messageDigest matches SEQ content hash
- * - Extract SignedAttributes DER (base64) - the complete payload
- * - Extract signature (base64)
- * - Extract certificate (base64)
- */
 /*
  * A Fulcio/keyless leaf certificate carries the OIDC issuer extension
  * 1.3.6.1.4.1.57264.1.1.  This check is intentionally cheap and is done
@@ -176,27 +128,6 @@ cert_is_keyless(X509 *signer)
 	return keyless;
 }
 
-static BOOLEAN
-pkcs7_signer_is_keyless(PKCS7 *p7)
-{
-	STACK_OF(X509) * signers;
-	X509 *signer;
-	BOOLEAN keyless = FALSE;
-
-	if (!p7 || !PKCS7_type_is_signed(p7))
-		return FALSE;
-
-	signers = PKCS7_get0_signers(p7, NULL, 0);
-	if (signers && sk_X509_num(signers) > 0) {
-		signer = sk_X509_value(signers, 0);
-		keyless = cert_is_keyless(signer);
-	}
-	if (signers)
-		sk_X509_free(signers);
-
-	return keyless;
-}
-
 static void
 osign_free_signature_blobs(OSIGN_SIGNATURE *sigs, UINTN count)
 {
@@ -213,410 +144,164 @@ osign_free_signature_blobs(OSIGN_SIGNATURE *sigs, UINTN count)
 	}
 }
 
-/*
- * Resolve and validate the PE Security Directory range once.  Both passes
- * use the same bounds so a malformed certificate table cannot make the
- * counting and extraction passes disagree.
- */
-static EFI_STATUS
-osign_sec_range(PE_COFF_LOADER_IMAGE_CONTEXT ctx, UINTN datasize, UINTN *start,
-                UINTN *size, UINTN *end)
-{
-	UINTN s;
-	UINTN e;
-
-	if (!ctx.SecDir || !start || !size || !end)
-		return EFI_INVALID_PARAMETER;
-
-	s = ctx.SecDir->VirtualAddress;
-	if (checked_add(s, ctx.SecDir->Size, &e) || e > datasize)
-		return EFI_INVALID_PARAMETER;
-
-	*start = s;
-	*size = ctx.SecDir->Size;
-	*end = e;
-	return EFI_SUCCESS;
-}
-
-/*
- * First pass: count only Fulcio-keyless signatures.  This deliberately
- * avoids digest/base64 work; extraction happens in the second pass.
- */
-static EFI_STATUS
-osign_count_keyless(char *data, UINTN datasize,
-                    PE_COFF_LOADER_IMAGE_CONTEXT ctx, UINTN *out_count)
-{
-	EFI_STATUS efi_status;
-	UINTN start, size, end;
-	UINTN offset = 0;
-	UINTN count = 0;
-
-	if (!out_count)
-		return EFI_INVALID_PARAMETER;
-	*out_count = 0;
-
-	efi_status = osign_sec_range(ctx, datasize, &start, &size, &end);
-	if (EFI_ERROR(efi_status))
-		return efi_status;
-
-	while (offset < size) {
-		const WIN_CERTIFICATE_EFI_PKCS *w;
-		UINTN next;
-
-		w = (const WIN_CERTIFICATE_EFI_PKCS *)ImageAddress(
-			data, datasize, start + offset);
-		if (!w)
-			break;
-
-		UINT32 wlen = w->Hdr.dwLength;
-		if (wlen < sizeof(w->Hdr) || wlen > size - offset)
-			break;
-
-		if (w->Hdr.wCertificateType == WIN_CERT_TYPE_PKCS_SIGNED_DATA &&
-		    wlen > sizeof(w->Hdr)) {
-			const unsigned char *p = w->CertData;
-			long der_len = (long)(wlen - sizeof(w->Hdr));
-			PKCS7 *p7 = d2i_PKCS7(NULL, &p, der_len);
-
-			if (p7 && pkcs7_signer_is_keyless(p7)) {
-				if (count >= OSIGN_MAX_SIGNATURE_COUNT) {
-					PKCS7_free(p7);
-					return EFI_BUFFER_TOO_SMALL;
-				}
-				count++;
-			}
-			if (p7)
-				PKCS7_free(p7);
-		}
-
-		if (checked_add(offset, wlen, &next) || next > size)
-			break;
-		offset = ALIGN_VALUE(next, 8);
-		if (offset < next)
-			break;
-	}
-
-	*out_count = count;
-	return EFI_SUCCESS;
-}
-
+/* Check the image digest independently of the SignerInfo digest algorithm. */
 static BOOLEAN
-extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
-                          CHAR8 **out_signed_attrs_b64, CHAR8 **out_sig_b64,
-                          CHAR8 **out_cert_b64, BOOLEAN *out_keyless)
+match_image_digest(const unsigned char *content, long size,
+                   const UINT8 *sha256, const UINT8 *sha1)
 {
-	if (!p7 || !PKCS7_type_is_signed(p7))
+	const unsigned char *p = content;
+	const unsigned char *end = content + size;
+	const ASN1_OCTET_STRING *digest;
+	const X509_ALGOR *algorithm;
+	const ASN1_OBJECT *oid;
+	const UINT8 *expected;
+	int expected_size;
+	int tag, xclass;
+	long len;
+	int flags;
+	BOOLEAN match = FALSE;
+
+	/* SpcAttributeTypeAndOptionalValue precedes DigestInfo. */
+	flags = ASN1_get_object(&p, &len, &tag, &xclass, size);
+	if (flags != V_ASN1_CONSTRUCTED || xclass != V_ASN1_UNIVERSAL ||
+	    tag != V_ASN1_SEQUENCE || len < 0 || len >= end - p)
 		return FALSE;
+	p += len;
 
-	/* Initialize output pointers to NULL if provided */
-	if (out_signed_attrs_b64)
-		*out_signed_attrs_b64 = NULL;
-	if (out_sig_b64)
-		*out_sig_b64 = NULL;
-	if (out_cert_b64)
-		*out_cert_b64 = NULL;
-	if (out_keyless)
-		*out_keyless = FALSE;
+	X509_SIG *info = d2i_X509_SIG(NULL, &p, end - p);
+	if (!info)
+		return FALSE;
+	if (p != end)
+		goto out;
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+	X509_SIG_get0(info, &algorithm, &digest);
+	if (!algorithm)
+		goto out;
+	X509_ALGOR_get0(&oid, NULL, NULL, algorithm);
+#else
+	algorithm = info->algor;
+	digest = info->digest;
+	oid = algorithm ? algorithm->algorithm : NULL;
+#endif
+	if (!oid || !digest || !digest->data)
+		goto out;
 
-	BOOLEAN result = FALSE;
-
-	if (p7 && p7->type) {
-		show_oid(p7->type);
-		show_oid(p7->d.sign->contents->type);
+	switch (OBJ_obj2nid(oid)) {
+	case NID_sha256:
+		expected = sha256;
+		expected_size = SHA256_DIGEST_SIZE;
+		break;
+	case NID_sha1:
+		expected = sha1;
+		expected_size = SHA1_DIGEST_SIZE;
+		break;
+	default:
+		goto out;
 	}
+	match = digest->length == expected_size &&
+	        memcmp(digest->data, expected, expected_size) == 0;
+out:
+	X509_SIG_free(info);
+	return match;
+}
 
-	PKCS7_SIGNED *sd = p7->d.sign;
+static EFI_STATUS
+extract_verification_data(PKCS7 *p7, const UINT8 *sha256, const UINT8 *sha1,
+                          OSIGN_SIGNATURE *sig)
+{
+	static const char spc_oid[] = "1.3.6.1.4.1.311.2.1.4";
+	char oid_text[sizeof(spc_oid)];
+	PKCS7_SIGNED *sd;
+	PKCS7_SIGNER_INFO *si;
+	PKCS7 *contents;
+	X509 *signer;
+	ASN1_STRING *sequence;
+	const ASN1_TYPE *attr;
+	const ASN1_OCTET_STRING *message_digest;
+	const unsigned char *p;
+	UINT8 hash[SHA256_DIGEST_SIZE];
+	int hash_size, tag, xclass, flags;
+	long len;
+	unsigned char *der = NULL;
+	int der_size;
+
+	if (!p7 || !PKCS7_type_is_signed(p7))
+		return EFI_NOT_FOUND;
+	sd = p7->d.sign;
 	if (!sd || !sd->signer_info ||
 	    sk_PKCS7_SIGNER_INFO_num(sd->signer_info) <= 0)
-		return FALSE;
-
-	PKCS7_SIGNER_INFO *si = sk_PKCS7_SIGNER_INFO_value(sd->signer_info, 0);
+		return EFI_NOT_FOUND;
+	si = sk_PKCS7_SIGNER_INFO_value(sd->signer_info, 0);
 	if (!si)
-		return FALSE;
-
-	/*
-	 * Classify the signature before doing any digest/SIDC/base64 work.
-	 * Only keyless signatures are sent to the remote service; keyed
-	 * signatures are left to the local DB/Mok/Vendor path.
-	 */
-	STACK_OF(X509) *signers = PKCS7_get0_signers(p7, NULL, 0);
-	X509 *signer = (signers && sk_X509_num(signers) > 0)
-	                     ? sk_X509_value(signers, 0)
-	                     : NULL;
-	if (!signer)
-		goto out;
-
+		return EFI_NOT_FOUND;
+	signer = PKCS7_cert_from_signer_info(p7, si);
 	if (!cert_is_keyless(signer))
-		goto out;
+		return EFI_NOT_FOUND;
 
-	if (out_keyless)
-		*out_keyless = TRUE;
+	contents = sd->contents;
+	if (!contents || !contents->type ||
+	    OBJ_obj2txt(oid_text, sizeof(oid_text), contents->type, 1) != sizeof(spc_oid) - 1 ||
+	    memcmp(oid_text, spc_oid, sizeof(spc_oid)) ||
+	    !contents->d.other || contents->d.other->type != V_ASN1_SEQUENCE)
+		return EFI_NOT_FOUND;
+	sequence = contents->d.other->value.sequence;
+	if (!sequence || !sequence->data || sequence->length <= 0)
+		return EFI_NOT_FOUND;
 
-	// md_nid: message digest algorithm numeric identifier
-	int md_nid = OBJ_obj2nid(si->digest_alg->algorithm);
-	const char *md_name = OBJ_nid2sn(md_nid);
-	if (!md_name)
-		md_name = "unknown";
+	p = sequence->data;
+	flags = ASN1_get_object(&p, &len, &tag, &xclass, sequence->length);
+	if (flags != V_ASN1_CONSTRUCTED || xclass != V_ASN1_UNIVERSAL ||
+	    tag != V_ASN1_SEQUENCE || len <= 0 ||
+	    len != sequence->data + sequence->length - p)
+		return EFI_NOT_FOUND;
 
-	// Get Content ( = SpcIndirectDataContent in AuthentiCode)
-	ASN1_STRING *astr = NULL;
-	if (sd->contents && sd->contents->d.other &&
-	    sd->contents->d.other->value.asn1_string)
-		astr = sd->contents->d.other->value.asn1_string;
-	if (!astr || !astr->data || astr->length <= 0) {
-		// console_print(L"[EXTRACT] Content of signedData miss \n");
-		goto out;
+	if (!si->digest_alg || !si->digest_alg->algorithm)
+		return EFI_NOT_FOUND;
+	switch (OBJ_obj2nid(si->digest_alg->algorithm)) {
+	case NID_sha256:
+		if (!SHA256(p, len, hash))
+			return EFI_DEVICE_ERROR;
+		hash_size = SHA256_DIGEST_SIZE;
+		break;
+	case NID_sha1:
+		if (!SHA1(p, len, hash))
+			return EFI_DEVICE_ERROR;
+		hash_size = SHA1_DIGEST_SIZE;
+		break;
+	default:
+		return EFI_NOT_FOUND;
 	}
 
-	// base contains DER encoding of the SpcIndirectDataContent
-	const unsigned char *base = astr->data;
-	long blen = astr->length;
+	attr = PKCS7_get_signed_attribute(si, NID_pkcs9_messageDigest);
+	if (!attr || attr->type != V_ASN1_OCTET_STRING)
+		return EFI_NOT_FOUND;
+	message_digest = attr->value.octet_string;
+	if (!message_digest || !message_digest->data ||
+	    message_digest->length != hash_size ||
+	    memcmp(message_digest->data, hash, hash_size) ||
+	    !match_image_digest(p, len, sha256, sha1) ||
+	    !si->enc_digest || !si->enc_digest->data || si->enc_digest->length <= 0)
+		return EFI_NOT_FOUND;
 
-	const unsigned char *p = base;
-	long rem = blen;
-	int tag = 0, xclass = 0;
-	long len = 0;
+	/* Use the same attribute encoding and order as OpenSSL verification. */
+	der_size = ASN1_item_i2d((ASN1_VALUE *)si->auth_attr, &der,
+	                        ASN1_ITEM_rptr(PKCS7_ATTR_VERIFY));
+	if (der_size > 0 && der)
+		sig->payload = b64_encode(der, der_size);
+	OPENSSL_free(der);
+	if (!sig->payload)
+		return EFI_OUT_OF_RESOURCES;
 
-	int r = ASN1_get_object(&p, &len, &tag, &xclass, rem);
-	if (r & 0x80 || tag != V_ASN1_SEQUENCE || len < 0 ||
-	    (p + len) > (base + blen)) {
-		// console_print(L"[EXTRACT] Invalid SpcIndirectDataContent SEQUENCE\n");
-		goto out;
-	}
+	sig->signature = b64_encode(si->enc_digest->data, si->enc_digest->length);
+	if (!sig->signature)
+		return EFI_OUT_OF_RESOURCES;
 
-	// SEQ content = SpcIndirectDataContent content bytes
-	const unsigned char *seq_content = p;
-	size_t seq_content_len = (size_t)len;
-
-	// Compute hash of SEQ content
-	CHAR8 seq_hash_hex[SHA256_DIGEST_SIZE * 2 + 1];
-	seq_hash_hex[0] = 0;
-	(void)hash_to_hex(md_nid, seq_content, seq_content_len, seq_hash_hex,
-	                  sizeof(seq_hash_hex));
-
-	// Get messageDigest from SignedAttributes
-	const ASN1_TYPE *tmd =
-		PKCS7_get_signed_attribute(si, NID_pkcs9_messageDigest);
-	if (!tmd || tmd->type != V_ASN1_OCTET_STRING) {
-		// console_print(L"[EXTRACT] messageDigest attr missing\n");
-		goto out;
-	}
-
-	CHAR8 md_attr_hex[SHA256_DIGEST_SIZE * 2 + 1];
-	md_attr_hex[0] = 0;
-	bin_to_hex_buf(tmd->value.octet_string->data,
-	               (UINTN)tmd->value.octet_string->length, md_attr_hex,
-	               sizeof(md_attr_hex), FALSE);
-
-	// Compare SEQ content hash with messageDigest
-	BOOLEAN md_match = ascii_eq(md_attr_hex, seq_hash_hex);
-
-	if (!md_match)
-		goto out;
-
-	// 解析SpcIndirectDataContent 中的DigestInfo， 取出内部的
-	// 文件哈希(DigestInfo.digest) 并与 generate_hash 的结果sha256/sha1比较
-	// SpcIndirectDataContent ::= SEQUENCE { SpcAttributeTypeAndOptionalValue, DigestInfo }
-	const unsigned char *q = seq_content;
-	long rem2 = (long)seq_content_len;
-	int ftag = 0, fxclass = 0;
-	long flen = 0;
-	int rr = ASN1_get_object(&q, &flen, &ftag, &fxclass, rem2);
-	if (rr & 0x80 || flen < 0 ||
-	    (q + flen) > (seq_content + seq_content_len)) {
-		// console_print( L"[EXTRACT] Parse first file of SpcIndirectDataContent failed\n");
-	} else {
-		// q points to first field content;
-		// compute total bytes used by first filed(header+content)
-		size_t first_hdr_len = (size_t)(q - seq_content);
-		size_t first_total = first_hdr_len + (size_t)flen;
-		if (first_total >= seq_content_len) {
-			// console_print(L"[EXTRACT] no room for DigestInfo\n");
-		} else {
-			const unsigned char *digptr = seq_content + first_total;
-			long dig_len = (long)(seq_content_len - first_total);
-			const unsigned char *tmp = digptr;
-			X509_SIG *di = d2i_X509_SIG(NULL, &tmp, dig_len);
-			if (!di) {
-				// console_print(L"[EXTRACT] failed to parse DigestInfo\n");
-			} else {
-				// embedded digest bytes and length - use accessors.
-				// Newer OpenSSL exposes X509_SIG_get0 and ASN1_STRING_get0_data;
-				// older versions need to access fields / use ASN1_STRING_data.
-				const unsigned char *embed = NULL;
-				int embed_len = 0;
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-				/* OpenSSL 1.1.0+ */
-				const ASN1_OCTET_STRING *digest_asn1 = NULL;
-				X509_SIG_get0(di, NULL, &digest_asn1);
-				if (digest_asn1) {
-					embed = ASN1_STRING_get0_data((
-						const ASN1_STRING *)digest_asn1);
-					embed_len = ASN1_STRING_length((
-						const ASN1_STRING *)digest_asn1);
-				}
-#else
-				/* Older OpenSSL: access struct field and use ASN1_STRING_data */
-				ASN1_OCTET_STRING *digest_asn1 = NULL;
-				/* X509_SIG layout historically exposes .digest */
-				digest_asn1 = di->digest;
-				if (digest_asn1) {
-					embed = ASN1_STRING_data(digest_asn1);
-					embed_len =
-						ASN1_STRING_length(digest_asn1);
-				}
-#endif
-
-				// Decide which file hash to compare against by length
-				BOOLEAN file_match = FALSE;
-				if (embed_len == SHA256_DIGEST_LENGTH &&
-				    sha256 && embed) {
-					file_match =
-						(memcmp(embed, sha256,
-					                SHA256_DIGEST_SIZE) ==
-					         0);
-				} else if (embed_len == SHA1_DIGEST_SIZE &&
-				           sha1 && embed) {
-					file_match =
-						(memcmp(embed, sha1,
-					                SHA1_DIGEST_SIZE) == 0);
-				} else {
-					// embed_len(digest len) unknown or file hash not computed
-					X509_SIG_free(di);
-					goto out;
-				}
-				X509_SIG_free(di);
-				if (!file_match)
-					goto out;
-			}
-		}
-	}
-
-	// Extract complete SignedAttributes DER (base64) - this is the payload for signature verification
-	if (si->auth_attr) {
-		// Use BIO to manually encode SignedAttributes as DER
-		BIO *bio = BIO_new(BIO_s_mem());
-		if (bio) {
-			// Write SET tag and length
-			unsigned char *buf = NULL;
-			long len = 0;
-
-			// First, calculate total length needed
-			int total_len = 0;
-			for (int i = 0;
-			     i < sk_X509_ATTRIBUTE_num(si->auth_attr); i++) {
-				X509_ATTRIBUTE *attr = sk_X509_ATTRIBUTE_value(
-					si->auth_attr, i);
-				unsigned char *attr_der = NULL;
-				int attr_len =
-					i2d_X509_ATTRIBUTE(attr, &attr_der);
-				if (attr_len > 0) {
-					total_len += attr_len;
-					OPENSSL_free(attr_der);
-				}
-			}
-
-			if (total_len > 0) {
-				// Write SET tag
-				BIO_write(bio, "\x31", 1);
-
-				// Write length (simplified - assumes < 128 bytes)
-				if (total_len < 128) {
-					BIO_write(bio, &total_len, 1);
-				} else {
-					// For longer lengths, use long form
-					unsigned char len_bytes[4];
-					int len_bytes_count = 0;
-					int temp_len = total_len;
-					while (temp_len > 0) {
-						len_bytes[len_bytes_count++] =
-							temp_len & 0xFF;
-						temp_len >>= 8;
-					}
-					BIO_write(bio,
-					          &(unsigned char){
-							  0x80 |
-							  len_bytes_count },
-					          1);
-					for (int i = len_bytes_count - 1;
-					     i >= 0; i--) {
-						BIO_write(bio, &len_bytes[i],
-						          1);
-					}
-				}
-
-				// Write each attribute
-				for (int i = 0;
-				     i < sk_X509_ATTRIBUTE_num(si->auth_attr);
-				     i++) {
-					X509_ATTRIBUTE *attr =
-						sk_X509_ATTRIBUTE_value(
-							si->auth_attr, i);
-					unsigned char *attr_der = NULL;
-					int attr_len = i2d_X509_ATTRIBUTE(
-						attr, &attr_der);
-					if (attr_len > 0 && attr_der) {
-						BIO_write(bio, attr_der,
-						          attr_len);
-						OPENSSL_free(attr_der);
-					}
-				}
-
-				// Get the DER data
-				len = BIO_get_mem_data(bio, &buf);
-				if (len > 0 && buf) {
-					/* Convert to base64 and return to caller (do not free here) */
-					CHAR8 *tmp_signed_attrs_b64 =
-						b64_encode(buf, len);
-					if (tmp_signed_attrs_b64) {
-						if (out_signed_attrs_b64)
-							*out_signed_attrs_b64 =
-								tmp_signed_attrs_b64;
-						else
-							FreePool(
-								tmp_signed_attrs_b64);
-					}
-				}
-			}
-			BIO_free(bio);
-		}
-	}
-
-	// Extract signature (base64)
-	if (si->enc_digest && si->enc_digest->data &&
-	    si->enc_digest->length > 0) {
-		CHAR8 *tmp_sig_b64 = b64_encode(si->enc_digest->data,
-		                                (UINTN)si->enc_digest->length);
-		if (tmp_sig_b64) {
-			if (out_sig_b64)
-				*out_sig_b64 = tmp_sig_b64;
-			else
-				FreePool(tmp_sig_b64);
-		}
-	}
-
-	// Extract certificate (base64)
-	if (signer) {
-		unsigned char *cert_der = NULL;
-		int cert_len = i2d_X509(signer, &cert_der);
-		if (cert_len > 0 && cert_der) {
-			CHAR8 *tmp_cert_b64 = b64_encode(cert_der, cert_len);
-			if (tmp_cert_b64) {
-				if (out_cert_b64)
-					*out_cert_b64 = tmp_cert_b64;
-				else
-					FreePool(tmp_cert_b64);
-			}
-			OPENSSL_free(cert_der);
-		}
-	}
-	result = TRUE;
-
-out:
-	if (signers)
-		sk_X509_free(signers);
-
-	return result;
+	der = NULL;
+	der_size = i2d_X509(signer, &der);
+	if (der_size > 0 && der)
+		sig->certificate = b64_encode(der, der_size);
+	OPENSSL_free(der);
+	return sig->certificate ? EFI_SUCCESS : EFI_OUT_OF_RESOURCES;
 }
 
 static EFI_STATUS
@@ -628,9 +313,10 @@ osign_extract_data(EFI_HANDLE image_handle, CHAR16 *path, CHAR8 **data,
 
 	efi_status = BS->HandleProtocol(image_handle, &EFI_LOADED_IMAGE_GUID,
 	                                (void **)&li);
-	if (EFI_ERROR(efi_status) || !li) {
+	if (EFI_ERROR(efi_status))
 		return efi_status;
-	}
+	if (!li)
+		return EFI_NOT_FOUND;
 
 	/* read_file_ondisk expects a void** for the buffer pointer */
 	*data = NULL;
@@ -657,149 +343,111 @@ out:
 }
 
 EFI_STATUS
-osign_parse_pkcs7(char *data, UINTN datasize, PE_COFF_LOADER_IMAGE_CONTEXT ctx,
+osign_parse_pkcs7(char *data, UINTN datasize,
+                  const PE_COFF_LOADER_IMAGE_CONTEXT *ctx,
+                  const UINT8 *sha256, const UINT8 *sha1,
                   OSIGN_SIGNATURE **out_sigs, UINTN *out_count)
 {
-	EFI_STATUS efi_status;
+	EFI_STATUS status;
 	OSIGN_SIGNATURE *sigs = NULL;
-	UINTN expected = 0;
-	UINTN actual = 0;
-	UINTN start, size, end;
-	UINTN offset = 0;
-	UINT8 sha1[SHA1_DIGEST_SIZE];
-	UINT8 sha256[SHA256_DIGEST_SIZE];
+	OSIGN_SIGNATURE sig = { 0 };
+	UINTN count = 0, capacity = 0;
+	UINTN start, size, offset = 0;
 
 	if (!out_sigs || !out_count)
 		return EFI_INVALID_PARAMETER;
-
 	*out_sigs = NULL;
 	*out_count = 0;
+	if (!data || !ctx || !ctx->SecDir || !sha256 || !sha1)
+		return EFI_INVALID_PARAMETER;
 
-	/*
-	 * First pass: count keyless signatures without extracting base64.
-	 * This makes the allocation exact and removes the old fixed-size
-	 * truncation.
-	 */
-	efi_status = osign_count_keyless(data, datasize, ctx, &expected);
-	if (EFI_ERROR(efi_status))
-		return efi_status;
-	if (expected == 0)
+	start = ctx->SecDir->VirtualAddress;
+	size = ctx->SecDir->Size;
+	if (!size)
 		return EFI_NOT_FOUND;
-	if (expected > OSIGN_MAX_SIGNATURE_COUNT)
-		return EFI_BUFFER_TOO_SMALL;
-	if (expected > ((UINTN)-1) / sizeof(OSIGN_SIGNATURE))
-		return EFI_OUT_OF_RESOURCES;
+	if (start > datasize || size != datasize - start || start % 8)
+		return EFI_INVALID_PARAMETER;
 
-	sigs = AllocatePool(expected * sizeof(OSIGN_SIGNATURE));
-	if (!sigs)
-		return EFI_OUT_OF_RESOURCES;
-	ZeroMem(sigs, expected * sizeof(OSIGN_SIGNATURE));
-
-	efi_status = osign_sec_range(ctx, datasize, &start, &size, &end);
-	if (EFI_ERROR(efi_status))
-		goto fail;
-
-	/*
-	 * The hash covers the image up to the certificate table, matching the
-	 * Authenticode digest/Extract verification used by extract_verification_data().
-	 */
-	efi_status = generate_hash(data, (unsigned)end, &ctx, sha256, sha1);
-	if (EFI_ERROR(efi_status))
-		goto fail;
-
-	/*
-	 * Second pass: extract only keyless signatures.  The count from pass 1
-	 * is an upper bound; a keyless certificate with a bad digest is skipped
-	 * here, so actual <= expected.
-	 */
 	while (offset < size) {
-		const WIN_CERTIFICATE_EFI_PKCS *w;
-		UINTN next;
+		WIN_CERTIFICATE header;
+		UINTN remaining = size - offset;
+		UINTN padding;
+		const unsigned char *record;
 
-		w = (const WIN_CERTIFICATE_EFI_PKCS *)ImageAddress(
-			data, datasize, start + offset);
-		if (!w)
-			break;
-
-		UINT32 wlen = w->Hdr.dwLength;
-		if (wlen < sizeof(w->Hdr) || wlen > size - offset)
-			break;
-
-		if (w->Hdr.wCertificateType == WIN_CERT_TYPE_PKCS_SIGNED_DATA &&
-		    wlen > sizeof(w->Hdr)) {
-			const unsigned char *p = w->CertData;
-			long der_len = (long)(wlen - sizeof(w->Hdr));
-			PKCS7 *p7 = d2i_PKCS7(NULL, &p, der_len);
-
-			if (p7 && PKCS7_type_is_signed(p7)) {
-				CHAR8 *payload_b64 = NULL;
-				CHAR8 *sig_b64 = NULL;
-				CHAR8 *cert_b64 = NULL;
-				BOOLEAN keyless = FALSE;
-
-				BOOLEAN ok = extract_verification_data(
-					p7, sha256, sha1, &payload_b64,
-					&sig_b64, &cert_b64, &keyless);
-
-				if (ok && keyless) {
-					if (actual >= expected) {
-						/* The two passes disagreed: fail closed. */
-						if (payload_b64)
-							FreePool(payload_b64);
-						if (sig_b64)
-							FreePool(sig_b64);
-						if (cert_b64)
-							FreePool(cert_b64);
-						if (p7)
-							PKCS7_free(p7);
-						efi_status =
-							EFI_BUFFER_TOO_SMALL;
-						goto fail;
-					}
-
-					sigs[actual].payload = payload_b64;
-					sigs[actual].signature = sig_b64;
-					sigs[actual].certificate = cert_b64;
-					payload_b64 = NULL;
-					sig_b64 = NULL;
-					cert_b64 = NULL;
-					actual++;
-				}
-				if (payload_b64)
-					FreePool(payload_b64);
-				if (sig_b64)
-					FreePool(sig_b64);
-				if (cert_b64)
-					FreePool(cert_b64);
-			}
-			if (p7)
-				PKCS7_free(p7);
+		if (remaining < sizeof(header)) {
+			status = EFI_INVALID_PARAMETER;
+			goto fail;
+		}
+		record = (const unsigned char *)data + start + offset;
+		memcpy(&header, record, sizeof(header));
+		if (header.dwLength < sizeof(header) || header.dwLength > remaining) {
+			status = EFI_INVALID_PARAMETER;
+			goto fail;
 		}
 
-		if (checked_add(offset, wlen, &next) || next > size)
-			break;
-		offset = ALIGN_VALUE(next, 8);
-		if (offset < next)
-			break;
+		padding = (8 - header.dwLength % 8) % 8;
+		if (padding > remaining - header.dwLength) {
+			status = EFI_INVALID_PARAMETER;
+			goto fail;
+		}
+		offset += header.dwLength + padding;
+		if (header.wCertificateType != WIN_CERT_TYPE_PKCS_SIGNED_DATA ||
+		    header.dwLength == sizeof(header))
+			continue;
+
+		const unsigned char *der = record + sizeof(header);
+		UINTN der_size = header.dwLength - sizeof(header);
+		if (der_size > LONG_MAX) {
+			status = EFI_INVALID_PARAMETER;
+			goto fail;
+		}
+		PKCS7 *p7 = d2i_PKCS7(NULL, &der, (long)der_size);
+		if (!p7)
+			continue;
+		status = extract_verification_data(p7, sha256, sha1, &sig);
+		PKCS7_free(p7);
+		if (status == EFI_NOT_FOUND)
+			continue;
+		if (EFI_ERROR(status))
+			goto fail;
+
+		if (count == OSIGN_MAX_SIGNATURE_COUNT) {
+			status = EFI_BUFFER_TOO_SMALL;
+			goto fail;
+		}
+		if (count == capacity) {
+			UINTN next = capacity ? capacity * 2 : 4;
+			if (next > OSIGN_MAX_SIGNATURE_COUNT)
+				next = OSIGN_MAX_SIGNATURE_COUNT;
+			OSIGN_SIGNATURE *larger = AllocatePool(next * sizeof(*sigs));
+			if (!larger) {
+				status = EFI_OUT_OF_RESOURCES;
+				goto fail;
+			}
+			if (sigs) {
+				CopyMem(larger, sigs, count * sizeof(*sigs));
+				FreePool(sigs);
+			}
+			sigs = larger;
+			capacity = next;
+		}
+		sigs[count++] = sig;
+		sig = (OSIGN_SIGNATURE){ 0 };
 	}
 
-	if (actual == 0) {
-		efi_status = EFI_NOT_FOUND;
-		goto fail;
-	}
-
+	if (count == 0)
+		return EFI_NOT_FOUND;
 	*out_sigs = sigs;
-	*out_count = actual;
+	*out_count = count;
 	return EFI_SUCCESS;
 
 fail:
-	osign_free_signature_blobs(sigs, actual);
+	osign_free_signature_blobs(&sig, 1);
+	osign_free_signature_blobs(sigs, count);
 	if (sigs)
 		FreePool(sigs);
-	return efi_status;
+	return status;
 }
-
-// extract_image_data removed (unused); keep osign_extract_data / osign_parse_pkcs7 instead.
 
 /* Decode cert (base64 DER) and return public key PEM as allocated CHAR8*.
  * Caller must FreePool() the returned pointer. Returns NULL on error.
@@ -886,43 +534,34 @@ cert_b64_to_pubkey_pem(const CHAR8 *cert_b64)
 BOOLEAN
 osign_verify(EFI_HANDLE image_handle, CHAR16 *target_path)
 {
-	EFI_STATUS efi_status;
-
-	// efi_status = extract_image_data(image_handle, target_path,
-	// 	&payload, &signature, &certificate);
-
+	EFI_STATUS status;
 	UINTN datasize = 0;
 	CHAR8 *data = NULL;
 	PE_COFF_LOADER_IMAGE_CONTEXT ctx;
-	efi_status = osign_extract_data(image_handle, target_path, &data,
-	                                &datasize, &ctx);
-	if (EFI_ERROR(efi_status)) {
-		return false;
-	}
-
+	UINT8 sha256[SHA256_DIGEST_SIZE], sha1[SHA1_DIGEST_SIZE];
 	OSIGN_SIGNATURE *sigs = NULL;
 	UINTN sig_count = 0;
-	efi_status = osign_parse_pkcs7((char *)data, datasize, ctx, &sigs,
-	                               &sig_count);
-	if (EFI_ERROR(efi_status) || sig_count == 0) {
-		if (sigs)
-			FreePool(sigs);
-		if (data)
-			FreePool(data);
-		return false;
-	}
 
-	efi_status = osign_http_request(image_handle, sigs, sig_count);
-	/* osign_http_request frees the blobs; the array is owned by us. */
+	status = osign_extract_data(image_handle, target_path, &data, &datasize,
+	                            &ctx);
+	if (EFI_ERROR(status))
+		goto out;
+	status = generate_hash((char *)data, (unsigned int)datasize, &ctx,
+	                       sha256, sha1);
+	if (EFI_ERROR(status))
+		goto out;
+	status = osign_parse_pkcs7((char *)data, datasize, &ctx, sha256, sha1,
+	                           &sigs, &sig_count);
+	if (EFI_ERROR(status))
+		goto out;
+
+	status = osign_http_request(image_handle, sigs, sig_count);
+	/* The request frees the blobs, and this caller owns the array. */
 	FreePool(sigs);
+out:
 	if (data)
 		FreePool(data);
-
-	return !EFI_ERROR(efi_status);
-
-	// console_print(L"[MAIN] payload: %a\n",payload?payload:"NULL");
-	// console_print(L"[MAIN] signature: %a\n",signature?signature:"NULL");
-	// console_print(L"[MAIN] certificate: %a\n",certificate?certificate:"NULL");
+	return !EFI_ERROR(status);
 }
 
 EFI_STATUS

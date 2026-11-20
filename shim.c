@@ -677,13 +677,15 @@ verify_local_authenticode (char *data, size_t size,
 
 static EFI_STATUS
 verify_keyless_authenticode (char *data, size_t size,
-			     PE_COFF_LOADER_IMAGE_CONTEXT *context)
+			     PE_COFF_LOADER_IMAGE_CONTEXT *context,
+			     const UINT8 *sha256hash, const UINT8 *sha1hash)
 {
 	OSIGN_SIGNATURE *sigs = NULL;
 	UINTN sig_count = 0;
 	EFI_STATUS efi_status;
 
-	efi_status = osign_parse_pkcs7(data, size, *context, &sigs, &sig_count);
+	efi_status = osign_parse_pkcs7(data, size, context, sha256hash, sha1hash,
+				      &sigs, &sig_count);
 	if (EFI_ERROR(efi_status)) {
 		if (sigs)
 			FreePool(sigs);
@@ -723,16 +725,12 @@ verify_keyless_authenticode (char *data, size_t size,
  * left unchanged: for LoadImage() the firmware DB check still runs before
  * shim_verify() is called.
  */
-EFI_STATUS
-verify_buffer_authenticode (char *data, int datasize,
+static EFI_STATUS
+verify_buffer_authenticode (char *data, size_t size,
 			    PE_COFF_LOADER_IMAGE_CONTEXT *context,
 			    UINT8 *sha256hash, UINT8 *sha1hash)
 {
 	EFI_STATUS ret_efi_status;
-	size_t size = datasize;
-
-	if (datasize < 0)
-		return EFI_INVALID_PARAMETER;
 
 	/*
 	 * Clear OpenSSL's error log, because we get some DSO unimplemented
@@ -741,22 +739,14 @@ verify_buffer_authenticode (char *data, int datasize,
 	 */
 	drain_openssl_errors();
 
-	ret_efi_status = generate_hash(data, datasize, context, sha256hash, sha1hash);
-	if (EFI_ERROR(ret_efi_status)) {
-		dprint(L"generate_hash: %r\n", ret_efi_status);
-		PrintErrors();
-		ClearErrors();
-		crypterr(ret_efi_status);
-		return ret_efi_status;
-	}
-
 #if defined(KEYLESS_FIRST)
 	/*
 	 * Keyless-first: no local DBX/DB/keyed work is done before the remote
 	 * service gets a chance to authorize the image.  If keyless is not
 	 * applicable or fails, fall through to the local path.
 	 */
-	ret_efi_status = verify_keyless_authenticode(data, size, context);
+	ret_efi_status = verify_keyless_authenticode(data, size, context,
+						    sha256hash, sha1hash);
 	if (!EFI_ERROR(ret_efi_status)) {
 		update_verification_method(VERIFIED_BY_KEYLESS);
 		drain_openssl_errors();
@@ -782,7 +772,8 @@ verify_buffer_authenticode (char *data, int datasize,
 		return local_status;
 	}
 
-	ret_efi_status = verify_keyless_authenticode(data, size, context);
+	ret_efi_status = verify_keyless_authenticode(data, size, context,
+						    sha256hash, sha1hash);
 	if (!EFI_ERROR(ret_efi_status)) {
 		update_verification_method(VERIFIED_BY_KEYLESS);
 		drain_openssl_errors();
@@ -857,10 +848,10 @@ verify_buffer_sbat (char *data, int datasize,
  * Check that the signature is valid and matches the binary and that
  * the binary is permitted to load by SBAT.
  */
-EFI_STATUS
-verify_buffer (char *data, int datasize,
-	       PE_COFF_LOADER_IMAGE_CONTEXT *context,
-	       UINT8 *sha256hash, UINT8 *sha1hash)
+static EFI_STATUS
+verify_buffer_with_hashes (char *data, int datasize,
+			   PE_COFF_LOADER_IMAGE_CONTEXT *context,
+			   UINT8 *sha256hash, UINT8 *sha1hash)
 {
 	EFI_STATUS efi_status;
 
@@ -869,6 +860,30 @@ verify_buffer (char *data, int datasize,
 		return efi_status;
 
 	return verify_buffer_sbat(data, datasize, context);
+}
+
+EFI_STATUS
+verify_buffer (char *data, int datasize,
+	       PE_COFF_LOADER_IMAGE_CONTEXT *context,
+	       UINT8 *sha256hash, UINT8 *sha1hash)
+{
+	EFI_STATUS ret_efi_status;
+
+	if (datasize < 0)
+		return EFI_INVALID_PARAMETER;
+
+	drain_openssl_errors();
+	ret_efi_status = generate_hash(data, datasize, context, sha256hash, sha1hash);
+	if (EFI_ERROR(ret_efi_status)) {
+		dprint(L"generate_hash: %r\n", ret_efi_status);
+		PrintErrors();
+		ClearErrors();
+		crypterr(ret_efi_status);
+		return ret_efi_status;
+	}
+
+	return verify_buffer_with_hashes(data, datasize, context,
+					sha256hash, sha1hash);
 }
 
 static int
@@ -1123,8 +1138,8 @@ EFI_STATUS shim_verify (void *buffer, UINT32 size)
 	 * "linux.c:433: out of memory".  The verification path only reads the
 	 * image (digest + SecDir PKCS#7), so no copy is required.
 	 */
-	efi_status = verify_buffer(buffer, size,
-			   &context, sha256hash, sha1hash);
+	efi_status = verify_buffer_with_hashes(buffer, size, &context,
+					      sha256hash, sha1hash);
 
 done:
 	in_protocol = 0;
