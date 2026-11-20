@@ -81,7 +81,8 @@ generate_hash(char *data, unsigned int datasize,
 
 	if (!sha256ctx || !sha1ctx) {
 		perror(L"Unable to allocate memory for hash context\n");
-		return EFI_OUT_OF_RESOURCES;
+		efi_status = EFI_OUT_OF_RESOURCES;
+		goto done;
 	}
 
 	if (!Sha256Init(sha256ctx) || !Sha1Init(sha1ctx)) {

@@ -30,8 +30,10 @@ typedef struct {
 	CHAR8 *certificate;
 } OSIGN_SIGNATURE;
 
+/* Both digests must be generated from the same full image buffer. */
 EFI_STATUS osign_parse_pkcs7(char *data, UINTN datasize,
-                             PE_COFF_LOADER_IMAGE_CONTEXT ctx,
+                             const PE_COFF_LOADER_IMAGE_CONTEXT *ctx,
+                             const UINT8 *sha256, const UINT8 *sha1,
                              OSIGN_SIGNATURE **out_sigs, UINTN *out_count);
 
 EFI_STATUS osign_http_request(EFI_HANDLE image_handle, OSIGN_SIGNATURE *sigs,
